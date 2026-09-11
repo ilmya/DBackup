@@ -1,0 +1,45 @@
+# 构建产物
+build/
+out/
+cmake-build-*/
+
+# IDE 临时文件
+.vscode/.browse.c_cpp.db
+.vscode/ipch/
+*.code-workspace
+
+# 编译中间文件
+*.o
+*.obj
+*.exe
+*.a
+*.lib
+*.dll
+*.pdb
+*.ilk
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# 测试产物
+test_output/
+*.gcov
+*.gcda
+*.gcno
+
+# 性能分析
+gmon.out
+*.prof
+
+# 备份文件生成的 .abk
+*.abk
+
+# OS 文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python 虚拟环境
+venv/
+.venv/

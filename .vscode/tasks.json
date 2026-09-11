@@ -1,0 +1,61 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake Configure",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["..", "-G", "MinGW Makefiles", "-DCMAKE_BUILD_TYPE=Debug"],
+      "options": { "cwd": "${workspaceFolder}/build" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake Build",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "."],
+      "options": { "cwd": "${workspaceFolder}/build" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Build & Run Tests",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", ".", "--target", "BackupToolTests"],
+      "options": { "cwd": "${workspaceFolder}/build" },
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Run Tests",
+      "type": "shell",
+      "command": "./build/tests/BackupToolTests.exe",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "cpplint",
+      "type": "shell",
+      "command": "cpplint",
+      "args": [
+        "--recursive",
+        "--extensions=cpp,h",
+        "--linelength=120",
+        "--filter=-build/c++11,-runtime/references,-whitespace/braces",
+        "${workspaceFolder}/*.cpp",
+        "${workspaceFolder}/*.h"
+      ],
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Clean Build",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", ".", "--target", "clean"],
+      "options": { "cwd": "${workspaceFolder}/build" },
+      "problemMatcher": []
+    }
+  ]
+}
