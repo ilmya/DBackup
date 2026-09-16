@@ -1,64 +1,67 @@
 // Copyright 2026 BackupTool Team. All rights reserved.
 
-/**
- * packer.h — 自定义 .abk (Archive Backup) 二进制格式的打包与解包核心
- *
- * ═══════════════════════════════════════════════════════════
- *  .abk 文件格式（小端序 Little-Endian）
- * ═══════════════════════════════════════════════════════════
- *
- *  ┌─────────────────────────────────────────────┐
- *  │  Header (20 bytes)                          │
- *  │    Magic       : 6 bytes  "ABKPKG"          │
- *  │    Version     : uint16   (当前 = 1)        │
- *  │    EntryCount  : uint32                     │
- *  │    Reserved    : 8 bytes  (全零)            │
- *  ├─────────────────────────────────────────────┤
- *  │  Entry 0                                    │
- *  │    FileType    : uint8    (0=文件, 1=目录)  │
- *  │    PathLen     : uint32                     │
- *  │    Path        : PathLen bytes (UTF-8)      │
- *  │    Mode        : uint32   (chmod 权限)      │
- *  │    Mtime       : int64    (ms since epoch)  │
- *  │    DataSize    : uint64                     │
- *  │    Data        : DataSize bytes             │
- *  ├─────────────────────────────────────────────┤
- *  │  Entry 1 ...                                │
- *  └─────────────────────────────────────────────┘
- */
-
 #ifndef PACKER_H_
 #define PACKER_H_
 
+#include <cstdint>
 #include <string>
 #include <vector>
-#include <cstdint>
+
+enum class EntryTypeFilter : uint8_t {
+    Any = 0,
+    FilesOnly = 1,
+    DirectoriesOnly = 2,
+};
+
+/** Optional criteria used while scanning a source directory. Empty/zero values mean "not set". */
+struct FilterOptions {
+    std::string pathContains;
+    std::string nameContains;
+    std::string extension;
+    std::string ownerContains;
+    EntryTypeFilter type = EntryTypeFilter::Any;
+    uint64_t minSize = 0;
+    uint64_t maxSize = 0;
+    int64_t afterMtimeMs = 0;
+    int64_t beforeMtimeMs = 0;
+};
+
+struct PackOptions {
+    int compressionLevel = 6;  // zlib level (0..9)
+    std::string password;       // empty means no encryption
+    FilterOptions filter;
+};
 
 struct ArchiveEntry {
-    uint8_t     type;           // 0 = 文件, 1 = 目录
-    std::string relativePath;   // 相对路径 (UTF-8)
-    uint32_t    mode;           // chmod 权限
-    int64_t     mtimeMs;        // 修改时间（毫秒时间戳）
-    std::string data;           // 文件数据（目录为空）
+    uint8_t     type;           // 0 = file, 1 = directory
+    uint8_t     flags = 0;      // v2: bit 0 = compressed payload
+    std::string relativePath;   // UTF-8 relative path
+    uint32_t    mode = 0;       // reserved for permissions
+    int64_t     mtimeMs = 0;    // modification time in milliseconds
+    std::string owner;          // UTF-8 owner name, if available
+    uint64_t    originalSize = 0;
+    std::string data;           // decoded file data; empty for directories
 };
 
 class Packer {
  public:
-    /**
-     * 将 sourceDir 打包为 .abk 文件
-     * @return true 成功, false 失败
-     */
+    /** Pack a directory using the legacy, uncompressed and unencrypted format. */
     static bool pack(const std::string &sourceDir, const std::string &destFile, std::string &error);
 
-    /**
-     * 从 .abk 文件读取所有条目
-     */
-    static bool readArchive(const std::string &archiveFile, std::vector<ArchiveEntry> &entries, std::string &error);
+    /** Sprint 2: pack with compression, optional password encryption and filters. */
+    static bool pack(const std::string &sourceDir, const std::string &destFile,
+                     const PackOptions &options, std::string &error);
 
-    /**
-     * 将 .abk 文件解包到目标目录
-     */
+    /** Read a v1/v2 archive. v2 encrypted archives require a password. */
+    static bool readArchive(const std::string &archiveFile, std::vector<ArchiveEntry> &entries,
+                            std::string &error);
+    static bool readArchive(const std::string &archiveFile, std::vector<ArchiveEntry> &entries,
+                            std::string &error, const std::string &password);
+
+    /** Unpack a v1/v2 archive. v2 encrypted archives require a password. */
     static bool unpack(const std::string &archiveFile, const std::string &destDir, std::string &error);
+    static bool unpack(const std::string &archiveFile, const std::string &destDir,
+                       std::string &error, const std::string &password);
 };
 
 #endif  // PACKER_H_

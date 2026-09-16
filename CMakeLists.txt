@@ -14,9 +14,11 @@ add_executable(BackupTool WIN32
     packer.h
 )
 
-target_link_libraries(BackupTool PRIVATE comctl32)
+target_link_libraries(BackupTool PRIVATE comctl32 comdlg32 ole32 gdi32 bcrypt advapi32 z)
 set_target_properties(BackupTool PROPERTIES WIN32_EXECUTABLE TRUE)
-target_link_options(BackupTool PRIVATE -municode)
+if(MINGW)
+    target_link_options(BackupTool PRIVATE -municode)
+endif()
 
 # ═══════════════════ gprof 性能分析 ═══════════════════
 # 启用: cmake .. -DPROFILING=ON
@@ -40,6 +42,7 @@ if(BUILD_TESTS)
     # 将 packer.cpp 编译为可复用对象库（主程序和测试共享）
     add_library(packer_lib STATIC packer.cpp packer.h)
     target_include_directories(packer_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(packer_lib PUBLIC bcrypt advapi32 z)
 
     # 测试可执行文件
     add_subdirectory(tests)
