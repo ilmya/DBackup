@@ -20,9 +20,13 @@
 #include <shlobj.h>
 #include <commctrl.h>
 #include <string>
-#include <thread>
 #include <codecvt>
 #include <locale>
+#include <sstream>
+#include <ctime>
+#include <algorithm>
+#include <iomanip>
+#include <cstdlib>
 
 #include "packer.h"
 
@@ -37,12 +41,15 @@ enum CtrlID {
     ID_BACKUP_DST     = 203,
     ID_BACKUP_DST_BTN = 204,
     ID_BTN_PACK       = 205,
+    ID_BACKUP_PASSWORD = 206,
+    ID_BACKUP_FILTER   = 207,
     // 还原面板
     ID_RESTORE_SRC     = 301,
     ID_RESTORE_SRC_BTN = 302,
     ID_RESTORE_DST     = 303,
     ID_RESTORE_DST_BTN = 304,
     ID_BTN_UNPACK      = 305,
+    ID_RESTORE_PASSWORD = 306,
     // 日志
     ID_LOG = 400,
 };
@@ -57,12 +64,22 @@ static HWND g_hBackupSrcBtn = nullptr;
 static HWND g_hBackupDst    = nullptr;
 static HWND g_hBackupDstBtn = nullptr;
 static HWND g_hBtnPack      = nullptr;
+static HWND g_hBackupSrcLabel = nullptr;
+static HWND g_hBackupDstLabel = nullptr;
+static HWND g_hBackupPasswordLabel = nullptr;
+static HWND g_hBackupFilterLabel = nullptr;
+static HWND g_hBackupPassword = nullptr;
+static HWND g_hBackupFilter = nullptr;
 // 还原面板控件
 static HWND g_hRestoreSrc    = nullptr;
 static HWND g_hRestoreSrcBtn = nullptr;
 static HWND g_hRestoreDst    = nullptr;
 static HWND g_hRestoreDstBtn = nullptr;
 static HWND g_hBtnUnpack     = nullptr;
+static HWND g_hRestoreSrcLabel = nullptr;
+static HWND g_hRestoreDstLabel = nullptr;
+static HWND g_hRestorePasswordLabel = nullptr;
+static HWND g_hRestorePassword = nullptr;
 // 日志
 static HWND g_hLog = nullptr;
 
@@ -101,20 +118,30 @@ static void SetEditText(HWND hEdit, const std::wstring &text) {
 
 static void ShowBackupPanel(bool show) {
     int cmd = show ? SW_SHOW : SW_HIDE;
+    ShowWindow(g_hBackupSrcLabel, cmd);
+    ShowWindow(g_hBackupDstLabel, cmd);
+    ShowWindow(g_hBackupPasswordLabel, cmd);
+    ShowWindow(g_hBackupFilterLabel, cmd);
     ShowWindow(g_hBackupSrc,    cmd);
     ShowWindow(g_hBackupSrcBtn, cmd);
     ShowWindow(g_hBackupDst,    cmd);
     ShowWindow(g_hBackupDstBtn, cmd);
     ShowWindow(g_hBtnPack,      cmd);
+    ShowWindow(g_hBackupPassword, cmd);
+    ShowWindow(g_hBackupFilter, cmd);
 }
 
 static void ShowRestorePanel(bool show) {
     int cmd = show ? SW_SHOW : SW_HIDE;
+    ShowWindow(g_hRestoreSrcLabel, cmd);
+    ShowWindow(g_hRestoreDstLabel, cmd);
+    ShowWindow(g_hRestorePasswordLabel, cmd);
     ShowWindow(g_hRestoreSrc,    cmd);
     ShowWindow(g_hRestoreSrcBtn, cmd);
     ShowWindow(g_hRestoreDst,    cmd);
     ShowWindow(g_hRestoreDstBtn, cmd);
     ShowWindow(g_hBtnUnpack,     cmd);
+    ShowWindow(g_hRestorePassword, cmd);
 }
 
 static void SwitchTab(int index) {
@@ -129,6 +156,44 @@ static void SwitchTab(int index) {
 
 static bool AreBothSet(HWND h1, HWND h2) {
     return GetWindowTextLengthW(h1) > 0 && GetWindowTextLengthW(h2) > 0;
+}
+
+static int64_t ParseDateMs(const std::string &value) {
+    std::tm tm = {};
+    std::istringstream input(value);
+    input >> std::get_time(&tm, "%Y-%m-%d");
+    if (input.fail()) return 0;
+    return static_cast<int64_t>(_mkgmtime(&tm)) * 1000;
+}
+
+static void ParseFilterSpec(const std::wstring &text, FilterOptions &filter) {
+    std::string spec = WtoU(text);
+    std::stringstream stream(spec);
+    std::string part;
+    while (std::getline(stream, part, ';')) {
+        size_t equal = part.find('=');
+        if (equal == std::string::npos) continue;
+        std::string key = part.substr(0, equal);
+        std::string value = part.substr(equal + 1);
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::string typeValue = value;
+        std::transform(typeValue.begin(), typeValue.end(), typeValue.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (key == "path") filter.pathContains = value;
+        else if (key == "name") filter.nameContains = value;
+        else if (key == "ext" || key == "extension") filter.extension = value;
+        else if (key == "owner" || key == "user") filter.ownerContains = value;
+        else if (key == "type") {
+            if (typeValue == "file" || typeValue == "files") filter.type = EntryTypeFilter::FilesOnly;
+            else if (typeValue == "dir" || typeValue == "directory" || typeValue == "directories") {
+                filter.type = EntryTypeFilter::DirectoriesOnly;
+            }
+        } else if (key == "minsize") filter.minSize = std::strtoull(value.c_str(), nullptr, 10);
+        else if (key == "maxsize") filter.maxSize = std::strtoull(value.c_str(), nullptr, 10);
+        else if (key == "after") filter.afterMtimeMs = ParseDateMs(value);
+        else if (key == "before") filter.beforeMtimeMs = ParseDateMs(value);
+    }
 }
 
 // ═══════════════════ 日志 ═══════════════════
@@ -202,40 +267,81 @@ static std::wstring BrowseForOpenFile(const wchar_t *title, const wchar_t *filte
 
 // ═══════════════════ 打包 / 解包操作 ═══════════════════
 
+struct PackThreadContext {
+    std::string src;
+    std::string dst;
+    PackOptions options;
+};
+
+struct UnpackThreadContext {
+    std::string src;
+    std::string dst;
+    std::string password;
+};
+
+static DWORD WINAPI PackThreadProc(LPVOID raw) {
+    PackThreadContext *context = static_cast<PackThreadContext *>(raw);
+    std::string error;
+    bool ok = Packer::pack(context->src, context->dst, context->options, error);
+    PostMessage(g_hWnd, WM_USER + 1, ok ? 1 : 0,
+                ok ? 0 : reinterpret_cast<LPARAM>(new std::string(error)));
+    delete context;
+    return 0;
+}
+
+static DWORD WINAPI UnpackThreadProc(LPVOID raw) {
+    UnpackThreadContext *context = static_cast<UnpackThreadContext *>(raw);
+    std::string error;
+    bool ok = Packer::unpack(context->src, context->dst, error, context->password);
+    PostMessage(g_hWnd, WM_USER + 2, ok ? 1 : 0,
+                ok ? 0 : reinterpret_cast<LPARAM>(new std::string(error)));
+    delete context;
+    return 0;
+}
+
 static void DoPack() {
     std::string src = WtoU(GetEditText(g_hBackupSrc));
     std::string dst = WtoU(GetEditText(g_hBackupDst));
+    PackOptions options;
+    options.password = WtoU(GetEditText(g_hBackupPassword));
+    ParseFilterSpec(GetEditText(g_hBackupFilter), options.filter);
 
     EnableWindow(g_hBtnPack, FALSE);
     SetWindowTextW(g_hBtnPack, L"打包中…");
     LogInfo(L"正在打包…");
 
     // 在后台线程执行打包，避免阻塞 UI
-    std::thread([src, dst]() {
-        std::string error;
-        bool ok = Packer::pack(src, dst, error);
-
-        // 回到 UI 线程更新界面
-        PostMessage(g_hWnd, WM_USER + 1, ok ? 1 : 0,
-                    ok ? 0 : (LPARAM) new std::string(error));
-    }).detach();
+    PackThreadContext *context = new PackThreadContext{src, dst, options};
+    HANDLE thread = CreateThread(nullptr, 0, PackThreadProc, context, 0, nullptr);
+    if (thread == nullptr) {
+        delete context;
+        EnableWindow(g_hBtnPack, TRUE);
+        SetWindowTextW(g_hBtnPack, L"开始备份");
+        LogError(L"无法创建后台打包线程");
+        return;
+    }
+    CloseHandle(thread);
 }
 
 static void DoUnpack() {
     std::string src = WtoU(GetEditText(g_hRestoreSrc));
     std::string dst = WtoU(GetEditText(g_hRestoreDst));
+    std::string password = WtoU(GetEditText(g_hRestorePassword));
 
     EnableWindow(g_hBtnUnpack, FALSE);
     SetWindowTextW(g_hBtnUnpack, L"还原中…");
     LogInfo(L"正在还原…");
 
-    std::thread([src, dst]() {
-        std::string error;
-        bool ok = Packer::unpack(src, dst, error);
-
-        PostMessage(g_hWnd, WM_USER + 2, ok ? 1 : 0,
-                    ok ? 0 : (LPARAM) new std::string(error));
-    }).detach();
+    UnpackThreadContext *context = new UnpackThreadContext{src, dst, password};
+    HANDLE thread = CreateThread(nullptr, 0, UnpackThreadProc, context, 0, nullptr);
+    if (thread == nullptr) {
+        delete context;
+        EnableWindow(g_hBtnUnpack, TRUE);
+        SetWindowTextW(g_hBtnUnpack, L"开始还原");
+        LogError(L"无法创建后台还原线程");
+        return;
+    }
+    CloseHandle(thread);
 }
 
 // ═══════════════════ 窗口过程 ═══════════════════
@@ -261,9 +367,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         TabCtrl_InsertItem(g_hTab, 1, &tie);
 
         // ═══ 打包面板 ═══
-        int ly1 = 95, ly2 = 135, ly3 = 185;
+        int ly1 = 95, ly2 = 135, ly3 = 250;
 
-        CreateWindowW(L"STATIC", L"源目录:", WS_CHILD | WS_VISIBLE,
+        g_hBackupSrcLabel = CreateWindowW(L"STATIC", L"源目录:", WS_CHILD | WS_VISIBLE,
             20, ly1 + 3, 60, 20, hWnd, nullptr, g_hInst, nullptr);
         g_hBackupSrc = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_READONLY | WS_BORDER,
@@ -272,7 +378,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             535, ly1, 120, 26, hWnd, (HMENU)ID_BACKUP_SRC_BTN, g_hInst, nullptr);
 
-        CreateWindowW(L"STATIC", L"备份路径:", WS_CHILD | WS_VISIBLE,
+        g_hBackupDstLabel = CreateWindowW(L"STATIC", L"备份路径:", WS_CHILD | WS_VISIBLE,
             20, ly2 + 3, 60, 20, hWnd, nullptr, g_hInst, nullptr);
         g_hBackupDst = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_READONLY | WS_BORDER,
@@ -281,14 +387,26 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             535, ly2, 120, 26, hWnd, (HMENU)ID_BACKUP_DST_BTN, g_hInst, nullptr);
 
+        g_hBackupPasswordLabel = CreateWindowW(L"STATIC", L"密码(可选):", WS_CHILD | WS_VISIBLE,
+            20, 175 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
+        g_hBackupPassword = CreateWindowW(L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_PASSWORD | WS_BORDER,
+            95, 175, 560, 26, hWnd, (HMENU)ID_BACKUP_PASSWORD, g_hInst, nullptr);
+
+        g_hBackupFilterLabel = CreateWindowW(L"STATIC", L"筛选(可选):", WS_CHILD | WS_VISIBLE,
+            20, 215 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
+        g_hBackupFilter = CreateWindowW(L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER,
+            95, 215, 560, 26, hWnd, (HMENU)ID_BACKUP_FILTER, g_hInst, nullptr);
+
         g_hBtnPack = CreateWindowW(L"BUTTON", L"开始备份",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             240, ly3, 200, 40, hWnd, (HMENU)ID_BTN_PACK, g_hInst, nullptr);
 
         // ═══ 还原面板（初始隐藏）═══
-        int ry1 = 95, ry2 = 135, ry3 = 185;
+        int ry1 = 95, ry2 = 135, ry3 = 250;
 
-        CreateWindowW(L"STATIC", L"备份文件:", WS_CHILD,
+        g_hRestoreSrcLabel = CreateWindowW(L"STATIC", L"备份文件:", WS_CHILD,
             20, ry1 + 3, 60, 20, hWnd, nullptr, g_hInst, nullptr);
         g_hRestoreSrc = CreateWindowW(L"EDIT", L"",
             WS_CHILD | ES_READONLY | WS_BORDER,
@@ -297,7 +415,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | BS_PUSHBUTTON,
             535, ry1, 120, 26, hWnd, (HMENU)ID_RESTORE_SRC_BTN, g_hInst, nullptr);
 
-        CreateWindowW(L"STATIC", L"还原目录:", WS_CHILD,
+        g_hRestoreDstLabel = CreateWindowW(L"STATIC", L"还原目录:", WS_CHILD,
             20, ry2 + 3, 60, 20, hWnd, nullptr, g_hInst, nullptr);
         g_hRestoreDst = CreateWindowW(L"EDIT", L"",
             WS_CHILD | ES_READONLY | WS_BORDER,
@@ -306,6 +424,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | BS_PUSHBUTTON,
             535, ry2, 120, 26, hWnd, (HMENU)ID_RESTORE_DST_BTN, g_hInst, nullptr);
 
+        g_hRestorePasswordLabel = CreateWindowW(L"STATIC", L"密码(可选):", WS_CHILD,
+            20, 175 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
+        g_hRestorePassword = CreateWindowW(L"EDIT", L"",
+            WS_CHILD | ES_PASSWORD | WS_BORDER,
+            95, 175, 560, 26, hWnd, (HMENU)ID_RESTORE_PASSWORD, g_hInst, nullptr);
+
         g_hBtnUnpack = CreateWindowW(L"BUTTON", L"开始还原",
             WS_CHILD | BS_PUSHBUTTON,
             240, ry3, 200, 40, hWnd, (HMENU)ID_BTN_UNPACK, g_hInst, nullptr);
@@ -313,7 +437,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         // ═══ 日志区域 ═══
         g_hLog = CreateWindowW(L"EDIT", L"就绪，请选择操作。",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL,
-            12, 240, 660, 130, hWnd, (HMENU)ID_LOG, g_hInst, nullptr);
+            12, 310, 660, 180, hWnd, (HMENU)ID_LOG, g_hInst, nullptr);
 
         // 设置日志字体为等宽字体
         HFONT hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -461,7 +585,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     RegisterClassExW(&wc);
 
     // 创建主窗口
-    int winW = 700, winH = 420;
+    int winW = 700, winH = 550;
     g_hWnd = CreateWindowExW(
         0,
         L"BackupToolWnd",

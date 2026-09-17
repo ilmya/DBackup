@@ -304,6 +304,46 @@ TEST_F(PackerTest, EmptyFileRoundTrip) {
     ASSERT_EQ(ReadFile(dstDir + "\\empty.txt"), "");
 }
 
+/** Sprint 2: zlib compression + AES-256 password protection. */
+TEST_F(PackerTest, CompressedEncryptedRoundTrip) {
+    std::string error;
+    std::string content(256 * 1024, 'A');
+    WriteFile(srcDir + "\\repetitive.txt", content);
+
+    PackOptions options;
+    options.password = "correct horse battery staple";
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+
+    std::vector<ArchiveEntry> entries;
+    ASSERT_TRUE(Packer::readArchive(abkFile, entries, error, options.password)) << error;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_NE(entries[0].flags & 1u, 0u) << "重复数据应使用压缩存储";
+    ASSERT_EQ(entries[0].data, content);
+
+    std::string wrongError;
+    EXPECT_FALSE(Packer::unpack(abkFile, dstDir, wrongError, "wrong password"));
+    ASSERT_TRUE(Packer::unpack(abkFile, dstDir, error, options.password)) << error;
+    EXPECT_EQ(ReadFile(dstDir + "\\repetitive.txt"), content);
+}
+
+/** Sprint 2: path/extension/size filters only include matching files. */
+TEST_F(PackerTest, FilterByExtensionAndSize) {
+    std::string error;
+    WriteFile(srcDir + "\\keep.txt", "keep me");
+    WriteFile(srcDir + "\\skip.bin", "skip me");
+
+    PackOptions options;
+    options.filter.type = EntryTypeFilter::FilesOnly;
+    options.filter.extension = ".txt";
+    options.filter.minSize = 1;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+
+    std::vector<ArchiveEntry> entries;
+    ASSERT_TRUE(Packer::readArchive(abkFile, entries, error)) << error;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].relativePath, "keep.txt");
+}
+
 // ═══════════════════ main ═══════════════════
 
 int main(int argc, char **argv) {
