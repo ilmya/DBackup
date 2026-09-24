@@ -294,17 +294,64 @@ std::string Lower(std::string value) {
     return value;
 }
 
+bool WildcardMatch(const std::string &patternValue, const std::string &textValue) {
+    std::string pattern = Lower(patternValue);
+    std::string text = Lower(textValue);
+    std::replace(pattern.begin(), pattern.end(), '\\', '/');
+    std::replace(text.begin(), text.end(), '\\', '/');
+    size_t p = 0, t = 0, star = std::string::npos, retry = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == text[t])) {
+            ++p;
+            ++t;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            while (p < pattern.size() && pattern[p] == '*') ++p;
+            star = p;
+            retry = t;
+        } else if (star != std::string::npos) {
+            p = star;
+            t = ++retry;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p;
+    return p == pattern.size();
+}
+
 bool Matches(const DirItem &item, const std::string &relativePath, const FilterOptions &filter) {
     if (filter.type == EntryTypeFilter::FilesOnly && item.isDir) return false;
     if (filter.type == EntryTypeFilter::DirectoriesOnly && !item.isDir) return false;
     const std::string path = Lower(relativePath);
     const std::string name = Lower(item.name);
+    bool hasIncludeRule = false;
+    bool includedByRule = false;
+    for (const auto &rule : filter.pathRules) {
+        if (rule.include) hasIncludeRule = true;
+        if (!WildcardMatch(rule.pattern, path)) continue;
+        if (!rule.include) return false;
+        includedByRule = true;
+    }
+    if (hasIncludeRule && !includedByRule) return false;
     if (!filter.pathContains.empty() && path.find(Lower(filter.pathContains)) == std::string::npos) return false;
     if (!filter.nameContains.empty() && name.find(Lower(filter.nameContains)) == std::string::npos) return false;
     if (!filter.extension.empty() && !item.isDir) {
         std::string ext = Lower(filter.extension);
         if (ext[0] != '.') ext.insert(ext.begin(), '.');
         if (name.size() < ext.size() || name.substr(name.size() - ext.size()) != ext) return false;
+    }
+    if (!filter.extensions.empty() && !item.isDir) {
+        bool extensionMatch = false;
+        for (std::string ext : filter.extensions) {
+            ext = Lower(ext);
+            if (!ext.empty() && ext[0] != '.') ext.insert(ext.begin(), '.');
+            if (!ext.empty() && name.size() >= ext.size() &&
+                name.substr(name.size() - ext.size()) == ext) {
+                extensionMatch = true;
+                break;
+            }
+        }
+        if (!extensionMatch) return false;
     }
     if (!filter.ownerContains.empty() && Lower(item.owner).find(Lower(filter.ownerContains)) == std::string::npos) return false;
     if (filter.minSize != 0 && item.size < filter.minSize) return false;
@@ -413,6 +460,60 @@ bool CollectSources(const std::vector<std::string> &sourcePaths, const std::stri
             return false;
         }
     }
+    return true;
+}
+
+void AddPreviewItem(const DirItem &item, bool included, BackupPreview &preview) {
+    if (item.isDir) {
+        if (included) ++preview.includedDirectories;
+        else ++preview.excludedDirectories;
+    } else if (included) {
+        ++preview.includedFiles;
+        preview.includedBytes += item.size;
+    } else {
+        ++preview.excludedFiles;
+        preview.excludedBytes += item.size;
+    }
+}
+
+bool PreviewDirectory(const std::string &dir, const std::string &base, const FilterOptions &filter,
+                      BackupPreview &preview, std::string &error) {
+    std::vector<DirItem> items;
+    if (!ListDirectory(dir, items, error)) return false;
+    for (const auto &item : items) {
+        const std::string relative = JoinPath(base, item.name);
+        AddPreviewItem(item, Matches(item, relative, filter), preview);
+        if (item.isDir && !PreviewDirectory(dir + "\\" + item.name, relative, filter, preview, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PreviewSource(const std::string &sourcePath, const FilterOptions &filter, bool includeRoot,
+                   BackupPreview &preview, std::string &error) {
+    const std::wstring sourceWide = UtoW(sourcePath);
+    WIN32_FILE_ATTRIBUTE_DATA data = {};
+    if (!GetFileAttributesExW(sourceWide.c_str(), GetFileExInfoStandard, &data)) {
+        error = "备份源不存在或无法读取: " + sourcePath;
+        return false;
+    }
+    if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        error = "暂不支持符号链接或重解析点: " + sourcePath;
+        return false;
+    }
+    size_t slash = sourceWide.find_last_of(L"\\/");
+    std::string name = WtoU(slash == std::wstring::npos ? sourceWide : sourceWide.substr(slash + 1));
+    if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return PreviewDirectory(sourcePath, includeRoot ? name : "", filter, preview, error);
+    }
+    DirItem item;
+    item.name = name;
+    item.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+    item.mtimeMs = FileTimeToMs(data.ftLastWriteTime);
+    item.owner = OwnerName(sourceWide);
+    item.attributes = data.dwFileAttributes;
+    AddPreviewItem(item, Matches(item, name, filter), preview);
     return true;
 }
 
@@ -797,7 +898,22 @@ bool ParseFilterOptions(const std::string &spec, FilterOptions &filter, std::str
         }
         if (key == "path") filter.pathContains = value;
         else if (key == "name") filter.nameContains = value;
-        else if (key == "ext" || key == "extension") filter.extension = value;
+        else if (key == "ext" || key == "extension") {
+            std::stringstream extensions(value);
+            std::string extension;
+            while (std::getline(extensions, extension, ',')) {
+                extension = trim(extension);
+                if (!extension.empty()) filter.extensions.push_back(extension);
+            }
+            if (filter.extensions.empty()) {
+                error = "筛选项 ext 至少需要一个扩展名";
+                return false;
+            }
+            if (filter.extensions.size() == 1) filter.extension = filter.extensions.front();
+        }
+        else if (key == "include" || key == "exclude") {
+            filter.pathRules.push_back(PathFilterRule{key == "include", value});
+        }
         else if (key == "owner" || key == "user") filter.ownerContains = value;
         else if (key == "type") {
             std::string type = Lower(value);
@@ -874,6 +990,23 @@ bool Packer::pack(const std::vector<std::string> &sourcePaths, const std::string
         out.write(reinterpret_cast<const char *>(storedBody.data()), static_cast<std::streamsize>(storedBody.size()));
         return static_cast<bool>(out);
     }, error);
+}
+
+bool Packer::preview(const std::vector<std::string> &sourcePaths, const FilterOptions &filter,
+                     BackupPreview &preview, std::string &error) {
+    preview = BackupPreview{};
+    error.clear();
+    if (sourcePaths.empty()) {
+        error = "请至少选择一个备份来源";
+        return false;
+    }
+    const bool multiple = sourcePaths.size() > 1;
+    std::unordered_set<std::wstring> uniqueSources;
+    for (const auto &sourcePath : sourcePaths) {
+        if (!uniqueSources.insert(AbsolutePath(sourcePath)).second) continue;
+        if (!PreviewSource(sourcePath, filter, multiple, preview, error)) return false;
+    }
+    return true;
 }
 
 bool Packer::readArchive(const std::string &archiveFile, std::vector<ArchiveEntry> &entries, std::string &error) {

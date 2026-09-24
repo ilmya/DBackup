@@ -13,17 +13,33 @@ enum class EntryTypeFilter : uint8_t {
     DirectoriesOnly = 2,
 };
 
+struct PathFilterRule {
+    bool include = false;
+    std::string pattern;
+};
+
 /** Optional criteria used while scanning a source directory. Empty/zero values mean "not set". */
 struct FilterOptions {
     std::string pathContains;
     std::string nameContains;
     std::string extension;
+    std::vector<std::string> extensions;
     std::string ownerContains;
+    std::vector<PathFilterRule> pathRules;
     EntryTypeFilter type = EntryTypeFilter::Any;
     uint64_t minSize = 0;
     uint64_t maxSize = 0;
     int64_t afterMtimeMs = 0;
     int64_t beforeMtimeMs = 0;
+};
+
+struct BackupPreview {
+    uint64_t includedFiles = 0;
+    uint64_t includedDirectories = 0;
+    uint64_t includedBytes = 0;
+    uint64_t excludedFiles = 0;
+    uint64_t excludedDirectories = 0;
+    uint64_t excludedBytes = 0;
 };
 
 struct PackOptions {
@@ -58,6 +74,10 @@ class Packer {
     /** Pack multiple files and/or directories into one v2 archive. */
     static bool pack(const std::vector<std::string> &sourcePaths, const std::string &destFile,
                      const PackOptions &options, std::string &error);
+
+    /** Scan metadata only and summarize the effect of the current filters. */
+    static bool preview(const std::vector<std::string> &sourcePaths, const FilterOptions &filter,
+                        BackupPreview &preview, std::string &error);
 
     /** Read a v1/v2 archive. v2 encrypted archives require a password. */
     static bool readArchive(const std::string &archiveFile, std::vector<ArchiveEntry> &entries,

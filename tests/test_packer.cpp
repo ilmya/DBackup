@@ -492,6 +492,65 @@ TEST_F(PackerTest, MultipleBackupSources) {
     EXPECT_EQ(ReadFile(dstDir + "\\folder\\nested.txt"), "nested");
 }
 
+/** Path, type, name, time, size and owner filters work together. */
+TEST_F(PackerTest, FilterAcrossAllSixCategories) {
+    std::string error;
+    WriteFile(srcDir + "\\docs\\report.txt", "filter target");
+    WriteFile(srcDir + "\\docs\\other.bin", "other");
+
+    PackOptions baselineOptions;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, baselineOptions, error)) << error;
+    std::vector<ArchiveEntry> baseline;
+    ASSERT_TRUE(Packer::readArchive(abkFile, baseline, error)) << error;
+    auto target = std::find_if(baseline.begin(), baseline.end(), [](const ArchiveEntry &entry) {
+        return entry.relativePath == "docs/report.txt";
+    });
+    ASSERT_NE(target, baseline.end());
+    ASSERT_FALSE(target->owner.empty()) << "当前系统应能读取测试文件所有者";
+
+    PackOptions options;
+    options.filter.pathContains = "docs";
+    options.filter.type = EntryTypeFilter::FilesOnly;
+    options.filter.nameContains = "report";
+    options.filter.afterMtimeMs = target->mtimeMs - 1000;
+    options.filter.beforeMtimeMs = target->mtimeMs + 1000;
+    options.filter.minSize = 1;
+    options.filter.maxSize = 1024;
+    options.filter.ownerContains = target->owner;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+
+    std::vector<ArchiveEntry> filtered;
+    ASSERT_TRUE(Packer::readArchive(abkFile, filtered, error)) << error;
+    ASSERT_EQ(filtered.size(), 1u);
+    EXPECT_EQ(filtered[0].relativePath, "docs/report.txt");
+}
+
+/** Type presets, wildcard exclusions and metadata-only preview agree with packing. */
+TEST_F(PackerTest, PreviewWithMultiExtensionAndWildcardRules) {
+    std::string error;
+    WriteFile(srcDir + "\\report.pdf", "document");
+    WriteFile(srcDir + "\\photo.jpg", "image");
+    WriteFile(srcDir + "\\cache.tmp", "temporary");
+
+    FilterOptions filter;
+    filter.extensions = {".pdf", ".jpg"};
+    filter.pathRules.push_back(PathFilterRule{false, "*.jpg"});
+
+    BackupPreview preview;
+    ASSERT_TRUE(Packer::preview({srcDir}, filter, preview, error)) << error;
+    EXPECT_EQ(preview.includedFiles, 1u);
+    EXPECT_EQ(preview.excludedFiles, 2u);
+    EXPECT_EQ(preview.includedBytes, 8u);
+
+    PackOptions options;
+    options.filter = filter;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+    std::vector<ArchiveEntry> entries;
+    ASSERT_TRUE(Packer::readArchive(abkFile, entries, error)) << error;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].relativePath, "report.pdf");
+}
+
 // ═══════════════════ main ═══════════════════
 
 int main(int argc, char **argv) {

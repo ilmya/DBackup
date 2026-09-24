@@ -38,6 +38,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <cstdlib>
+#include <climits>
+#include <cwchar>
 
 #include "packer.h"
 
@@ -55,6 +57,7 @@ enum CtrlID {
     ID_BACKUP_PASSWORD = 206,
     ID_BACKUP_FILTER   = 207,
     ID_BACKUP_REMOVE_BTN = 208,
+    ID_BACKUP_FILTER_BTN = 209,
     // 还原面板
     ID_RESTORE_SRC     = 301,
     ID_RESTORE_SRC_BTN = 302,
@@ -83,6 +86,7 @@ static HWND g_hBackupPasswordLabel = nullptr;
 static HWND g_hBackupFilterLabel = nullptr;
 static HWND g_hBackupPassword = nullptr;
 static HWND g_hBackupFilter = nullptr;
+static HWND g_hBackupFilterBtn = nullptr;
 // 还原面板控件
 static HWND g_hRestoreSrc    = nullptr;
 static HWND g_hRestoreSrcBtn = nullptr;
@@ -96,6 +100,26 @@ static HWND g_hRestorePassword = nullptr;
 // 日志
 static HWND g_hLog = nullptr;
 static std::vector<std::wstring> g_backupSources;
+
+struct FilterFormState {
+    std::wstring path;
+    std::wstring name;
+    std::wstring extension;
+    std::wstring type;
+    std::wstring minSize;
+    std::wstring maxSize;
+    std::wstring after;
+    std::wstring before;
+    std::wstring owner;
+    int minSizeUnit = 2;  // MB
+    int maxSizeUnit = 2;
+    bool excludeTemporary = false;
+    bool excludeCache = false;
+    bool excludeBuild = false;
+    bool excludeLogs = false;
+};
+
+static FilterFormState g_filterForm;
 
 // ═══════════════════ 字符串转换 ═══════════════════
 
@@ -144,6 +168,7 @@ static void ShowBackupPanel(bool show) {
     ShowWindow(g_hBtnPack,      cmd);
     ShowWindow(g_hBackupPassword, cmd);
     ShowWindow(g_hBackupFilter, cmd);
+    ShowWindow(g_hBackupFilterBtn, cmd);
 }
 
 static void ShowRestorePanel(bool show) {
@@ -295,6 +320,325 @@ static void AddBackupSources(const std::vector<std::wstring> &paths) {
     RefreshBackupSources();
 }
 
+enum FilterDialogID {
+    ID_FILTER_PATH = 1001,
+    ID_FILTER_NAME,
+    ID_FILTER_EXTENSION,
+    ID_FILTER_TYPE,
+    ID_FILTER_MIN_SIZE,
+    ID_FILTER_MAX_SIZE,
+    ID_FILTER_AFTER,
+    ID_FILTER_BEFORE,
+    ID_FILTER_OWNER,
+    ID_FILTER_TYPE_PRESET,
+    ID_FILTER_MIN_UNIT,
+    ID_FILTER_MAX_UNIT,
+    ID_FILTER_TEMP,
+    ID_FILTER_CACHE,
+    ID_FILTER_BUILD,
+    ID_FILTER_LOGS,
+    ID_FILTER_TODAY,
+    ID_FILTER_7_DAYS,
+    ID_FILTER_30_DAYS,
+    ID_FILTER_PREVIEW,
+    ID_FILTER_PREVIEW_TEXT,
+    ID_FILTER_APPLY,
+    ID_FILTER_CLEAR,
+    ID_FILTER_CANCEL,
+};
+
+static HWND CreateFilterEdit(HWND parent, int id, int x, int y, int width,
+                             const std::wstring &value) {
+    return CreateWindowW(L"EDIT", value.c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                         x, y, width, 24, parent, reinterpret_cast<HMENU>(id), g_hInst, nullptr);
+}
+
+static void AddFilterLabel(HWND parent, const wchar_t *text, int x, int y, int width = 90) {
+    CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
+                  x, y + 3, width, 20, parent, nullptr, g_hInst, nullptr);
+}
+
+static std::wstring FilterControlText(HWND window, int id) {
+    return GetEditText(GetDlgItem(window, id));
+}
+
+static std::wstring BuildFilterSpec(const FilterFormState &state) {
+    std::wstring spec;
+    auto append = [&](const wchar_t *key, const std::wstring &value) {
+        if (value.empty()) return;
+        if (!spec.empty()) spec += L";";
+        spec += key;
+        spec += L"=";
+        spec += value;
+    };
+    append(L"path", state.path);
+    append(L"name", state.name);
+    append(L"ext", state.extension);
+    append(L"type", state.type);
+    auto sizedValue = [](const std::wstring &value, int unit) {
+        if (value.empty()) return std::wstring{};
+        wchar_t *end = nullptr;
+        unsigned long long number = std::wcstoull(value.c_str(), &end, 10);
+        if (end == value.c_str() || *end != L'\0') return value;
+        static const unsigned long long multipliers[] = {1ULL, 1024ULL, 1024ULL * 1024ULL,
+                                                         1024ULL * 1024ULL * 1024ULL};
+        if (unit < 0 || unit > 3 || number > ULLONG_MAX / multipliers[unit]) {
+            return std::wstring(L"invalid");
+        }
+        return std::to_wstring(number * multipliers[unit]);
+    };
+    append(L"minsize", sizedValue(state.minSize, state.minSizeUnit));
+    append(L"maxsize", sizedValue(state.maxSize, state.maxSizeUnit));
+    append(L"after", state.after);
+    append(L"before", state.before);
+    append(L"owner", state.owner);
+    if (state.excludeTemporary) {
+        append(L"exclude", L"*.tmp");
+        append(L"exclude", L"*.temp");
+        append(L"exclude", L"~*");
+    }
+    if (state.excludeCache) {
+        append(L"exclude", L"*Thumbs.db");
+        append(L"exclude", L"*desktop.ini");
+    }
+    if (state.excludeBuild) {
+        append(L"exclude", L"node_modules/*");
+        append(L"exclude", L"*/node_modules/*");
+        append(L"exclude", L"build/*");
+        append(L"exclude", L"*/build/*");
+        append(L"exclude", L"out/*");
+        append(L"exclude", L"*/out/*");
+        append(L"exclude", L"target/*");
+        append(L"exclude", L"*/target/*");
+    }
+    if (state.excludeLogs) append(L"exclude", L"*.log");
+    return spec;
+}
+
+static FilterFormState ReadFilterForm(HWND window) {
+    FilterFormState candidate;
+    candidate.path = FilterControlText(window, ID_FILTER_PATH);
+    candidate.name = FilterControlText(window, ID_FILTER_NAME);
+    candidate.extension = FilterControlText(window, ID_FILTER_EXTENSION);
+    LRESULT typeIndex = SendMessageW(GetDlgItem(window, ID_FILTER_TYPE), CB_GETCURSEL, 0, 0);
+    candidate.type = typeIndex == 1 ? L"file" : (typeIndex == 2 ? L"dir" : L"");
+    candidate.minSize = FilterControlText(window, ID_FILTER_MIN_SIZE);
+    candidate.maxSize = FilterControlText(window, ID_FILTER_MAX_SIZE);
+    candidate.minSizeUnit = static_cast<int>(SendMessageW(GetDlgItem(window, ID_FILTER_MIN_UNIT), CB_GETCURSEL, 0, 0));
+    candidate.maxSizeUnit = static_cast<int>(SendMessageW(GetDlgItem(window, ID_FILTER_MAX_UNIT), CB_GETCURSEL, 0, 0));
+    candidate.after = FilterControlText(window, ID_FILTER_AFTER);
+    candidate.before = FilterControlText(window, ID_FILTER_BEFORE);
+    candidate.owner = FilterControlText(window, ID_FILTER_OWNER);
+    candidate.excludeTemporary = SendMessageW(GetDlgItem(window, ID_FILTER_TEMP), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.excludeCache = SendMessageW(GetDlgItem(window, ID_FILTER_CACHE), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.excludeBuild = SendMessageW(GetDlgItem(window, ID_FILTER_BUILD), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.excludeLogs = SendMessageW(GetDlgItem(window, ID_FILTER_LOGS), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    return candidate;
+}
+
+static std::wstring DateDaysAgo(int days) {
+    time_t value = std::time(nullptr) - static_cast<time_t>(days) * 24 * 60 * 60;
+    std::tm local = {};
+    localtime_s(&local, &value);
+    wchar_t text[16] = {};
+    std::wcsftime(text, 16, L"%Y-%m-%d", &local);
+    return text;
+}
+
+static std::wstring HumanSize(uint64_t bytes) {
+    const wchar_t *units[] = {L"B", L"KB", L"MB", L"GB", L"TB"};
+    double value = static_cast<double>(bytes);
+    int unit = 0;
+    while (value >= 1024.0 && unit < 4) {
+        value /= 1024.0;
+        ++unit;
+    }
+    wchar_t text[64] = {};
+    swprintf(text, 64, L"%.2f %ls", value, units[unit]);
+    return text;
+}
+
+static LRESULT CALLBACK FilterDialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_CREATE: {
+        AddFilterLabel(window, L"路径包含:", 20, 20);
+        CreateFilterEdit(window, ID_FILTER_PATH, 115, 20, 400, g_filterForm.path);
+        AddFilterLabel(window, L"名称包含:", 20, 55);
+        CreateFilterEdit(window, ID_FILTER_NAME, 115, 55, 400, g_filterForm.name);
+        AddFilterLabel(window, L"扩展名:", 20, 90);
+        CreateFilterEdit(window, ID_FILTER_EXTENSION, 115, 90, 150, g_filterForm.extension);
+        AddFilterLabel(window, L"类型:", 285, 90, 55);
+        HWND typeCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER |
+            CBS_DROPDOWNLIST, 345, 90, 170, 120, window,
+            reinterpret_cast<HMENU>(ID_FILTER_TYPE), g_hInst, nullptr);
+        SendMessageW(typeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"全部"));
+        SendMessageW(typeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"仅文件"));
+        SendMessageW(typeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"仅文件夹"));
+        int typeIndex = g_filterForm.type == L"file" ? 1 : (g_filterForm.type == L"dir" ? 2 : 0);
+        SendMessageW(typeCombo, CB_SETCURSEL, typeIndex, 0);
+        AddFilterLabel(window, L"最小尺寸:", 20, 125, 110);
+        CreateFilterEdit(window, ID_FILTER_MIN_SIZE, 135, 125, 75, g_filterForm.minSize);
+        HWND minUnit = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+            213, 125, 55, 100, window, reinterpret_cast<HMENU>(ID_FILTER_MIN_UNIT), g_hInst, nullptr);
+        AddFilterLabel(window, L"最大尺寸:", 285, 125, 110);
+        CreateFilterEdit(window, ID_FILTER_MAX_SIZE, 400, 125, 60, g_filterForm.maxSize);
+        HWND maxUnit = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+            463, 125, 55, 100, window, reinterpret_cast<HMENU>(ID_FILTER_MAX_UNIT), g_hInst, nullptr);
+        for (const wchar_t *unit : {L"B", L"KB", L"MB", L"GB"}) {
+            SendMessageW(minUnit, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(unit));
+            SendMessageW(maxUnit, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(unit));
+        }
+        SendMessageW(minUnit, CB_SETCURSEL, g_filterForm.minSizeUnit, 0);
+        SendMessageW(maxUnit, CB_SETCURSEL, g_filterForm.maxSizeUnit, 0);
+        AddFilterLabel(window, L"修改时间从:", 20, 160, 90);
+        CreateFilterEdit(window, ID_FILTER_AFTER, 115, 160, 150, g_filterForm.after);
+        AddFilterLabel(window, L"到:", 285, 160, 40);
+        CreateFilterEdit(window, ID_FILTER_BEFORE, 330, 160, 185, g_filterForm.before);
+        AddFilterLabel(window, L"所有者包含:", 20, 195);
+        CreateFilterEdit(window, ID_FILTER_OWNER, 115, 195, 400, g_filterForm.owner);
+        AddFilterLabel(window, L"类型预设:", 20, 230);
+        HWND preset = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+            115, 230, 180, 180, window, reinterpret_cast<HMENU>(ID_FILTER_TYPE_PRESET), g_hInst, nullptr);
+        for (const wchar_t *category : {L"不限制", L"文档", L"图片", L"音频", L"视频", L"压缩包", L"程序代码"}) {
+            SendMessageW(preset, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(category));
+        }
+        SendMessageW(preset, CB_SETCURSEL, 0, 0);
+        CreateWindowW(L"STATIC", L"选择预设会自动填写上方扩展名；也可用逗号填写多个扩展名。",
+                      WS_CHILD | WS_VISIBLE, 305, 233, 305, 20, window, nullptr, g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"临时文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            20, 265, 100, 22, window, reinterpret_cast<HMENU>(ID_FILTER_TEMP), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"系统缓存", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            130, 265, 100, 22, window, reinterpret_cast<HMENU>(ID_FILTER_CACHE), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"编译输出", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            240, 265, 100, 22, window, reinterpret_cast<HMENU>(ID_FILTER_BUILD), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"日志文件", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            350, 265, 100, 22, window, reinterpret_cast<HMENU>(ID_FILTER_LOGS), g_hInst, nullptr);
+        SendMessageW(GetDlgItem(window, ID_FILTER_TEMP), BM_SETCHECK, g_filterForm.excludeTemporary, 0);
+        SendMessageW(GetDlgItem(window, ID_FILTER_CACHE), BM_SETCHECK, g_filterForm.excludeCache, 0);
+        SendMessageW(GetDlgItem(window, ID_FILTER_BUILD), BM_SETCHECK, g_filterForm.excludeBuild, 0);
+        SendMessageW(GetDlgItem(window, ID_FILTER_LOGS), BM_SETCHECK, g_filterForm.excludeLogs, 0);
+        CreateWindowW(L"BUTTON", L"今天", WS_CHILD | WS_VISIBLE, 20, 300, 75, 25,
+            window, reinterpret_cast<HMENU>(ID_FILTER_TODAY), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"最近 7 天", WS_CHILD | WS_VISIBLE, 105, 300, 90, 25,
+            window, reinterpret_cast<HMENU>(ID_FILTER_7_DAYS), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"最近 30 天", WS_CHILD | WS_VISIBLE, 205, 300, 100, 25,
+            window, reinterpret_cast<HMENU>(ID_FILTER_30_DAYS), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"扫描预览", WS_CHILD | WS_VISIBLE, 480, 300, 100, 25,
+            window, reinterpret_cast<HMENU>(ID_FILTER_PREVIEW), g_hInst, nullptr);
+        CreateWindowW(L"STATIC", L"预览：尚未扫描", WS_CHILD | WS_VISIBLE,
+            20, 338, 580, 22, window, reinterpret_cast<HMENU>(ID_FILTER_PREVIEW_TEXT), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"应用", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                      165, 375, 100, 30, window, reinterpret_cast<HMENU>(ID_FILTER_APPLY), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"清空", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                      280, 375, 100, 30, window, reinterpret_cast<HMENU>(ID_FILTER_CLEAR), g_hInst, nullptr);
+        CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                      395, 375, 100, 30, window, reinterpret_cast<HMENU>(ID_FILTER_CANCEL), g_hInst, nullptr);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == ID_FILTER_TYPE_PRESET && HIWORD(wParam) == CBN_SELCHANGE) {
+            int selected = static_cast<int>(SendMessageW(GetDlgItem(window, ID_FILTER_TYPE_PRESET),
+                                                         CB_GETCURSEL, 0, 0));
+            const wchar_t *extensions[] = {
+                L"", L".doc,.docx,.pdf,.txt,.md,.xls,.xlsx,.ppt,.pptx",
+                L".jpg,.jpeg,.png,.gif,.bmp,.webp", L".mp3,.wav,.flac,.aac",
+                L".mp4,.mkv,.avi,.mov,.wmv", L".zip,.7z,.rar,.tar,.gz",
+                L".c,.cpp,.h,.hpp,.java,.py,.js,.ts,.go,.rs,.cs"
+            };
+            if (selected >= 0 && selected < 7) {
+                SetEditText(GetDlgItem(window, ID_FILTER_EXTENSION), extensions[selected]);
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == ID_FILTER_TODAY || LOWORD(wParam) == ID_FILTER_7_DAYS ||
+            LOWORD(wParam) == ID_FILTER_30_DAYS) {
+            int days = LOWORD(wParam) == ID_FILTER_TODAY ? 0 :
+                       (LOWORD(wParam) == ID_FILTER_7_DAYS ? 6 : 29);
+            SetEditText(GetDlgItem(window, ID_FILTER_AFTER), DateDaysAgo(days));
+            SetEditText(GetDlgItem(window, ID_FILTER_BEFORE), DateDaysAgo(0));
+            return 0;
+        }
+        if (LOWORD(wParam) == ID_FILTER_PREVIEW) {
+            if (g_backupSources.empty()) {
+                MessageBoxW(window, L"请先在主窗口选择要备份的文件或文件夹。", L"无法预览",
+                            MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            FilterFormState candidate = ReadFilterForm(window);
+            std::string error;
+            FilterOptions options;
+            if (!ParseFilterOptions(WtoU(BuildFilterSpec(candidate)), options, error)) {
+                MessageBoxW(window, UtoW(error).c_str(), L"无法预览", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+            std::vector<std::string> sources;
+            for (const auto &source : g_backupSources) sources.push_back(WtoU(source));
+            BackupPreview preview;
+            if (!Packer::preview(sources, options, preview, error)) {
+                MessageBoxW(window, UtoW(error).c_str(), L"预览失败", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+            std::wstring summary = L"包含 " + std::to_wstring(preview.includedFiles) + L" 个文件（" +
+                HumanSize(preview.includedBytes) + L"），排除 " +
+                std::to_wstring(preview.excludedFiles) + L" 个文件（" +
+                HumanSize(preview.excludedBytes) + L"）";
+            SetWindowTextW(GetDlgItem(window, ID_FILTER_PREVIEW_TEXT), summary.c_str());
+            return 0;
+        }
+        if (LOWORD(wParam) == ID_FILTER_APPLY) {
+            FilterFormState candidate = ReadFilterForm(window);
+            std::wstring spec = BuildFilterSpec(candidate);
+            std::string error;
+            FilterOptions parsed;
+            if (!ParseFilterOptions(WtoU(spec), parsed, error)) {
+                MessageBoxW(window, UtoW(error).c_str(), L"筛选条件无效", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+            g_filterForm = std::move(candidate);
+            SetEditText(g_hBackupFilter, spec.empty() ? L"未设置筛选条件" : spec);
+            DestroyWindow(window);
+            return 0;
+        }
+        if (LOWORD(wParam) == ID_FILTER_CLEAR) {
+            g_filterForm = FilterFormState{};
+            SetEditText(g_hBackupFilter, L"未设置筛选条件");
+            DestroyWindow(window);
+            return 0;
+        }
+        if (LOWORD(wParam) == ID_FILTER_CANCEL) {
+            DestroyWindow(window);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+static void ShowFilterDialog() {
+    EnableWindow(g_hWnd, FALSE);
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"DBackupFilterWindow",
+        L"备份筛选配置", WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 640, 455, g_hWnd, nullptr, g_hInst, nullptr);
+    if (!dialog) {
+        EnableWindow(g_hWnd, TRUE);
+        LogError(L"无法打开筛选配置窗口");
+        return;
+    }
+    ShowWindow(dialog, SW_SHOW);
+    MSG message;
+    while (IsWindow(dialog) && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(g_hWnd, TRUE);
+    SetForegroundWindow(g_hWnd);
+}
+
 static std::wstring BrowseForSaveFile(const wchar_t *title) {
     IFileSaveDialog *dialog = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
@@ -354,7 +698,7 @@ static void DoPack() {
     PackOptions options;
     options.password = WtoU(GetEditText(g_hBackupPassword));
     std::string filterError;
-    if (!ParseFilterOptions(WtoU(GetEditText(g_hBackupFilter)), options.filter, filterError)) {
+    if (!ParseFilterOptions(WtoU(BuildFilterSpec(g_filterForm)), options.filter, filterError)) {
         LogError(L"筛选条件无效: " + UtoW(filterError));
         return;
     }
@@ -451,9 +795,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         g_hBackupFilterLabel = CreateWindowW(L"STATIC", L"筛选(可选):", WS_CHILD | WS_VISIBLE,
             20, 240 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
-        g_hBackupFilter = CreateWindowW(L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_BORDER,
-            95, 240, 560, 26, hWnd, (HMENU)ID_BACKUP_FILTER, g_hInst, nullptr);
+        g_hBackupFilter = CreateWindowW(L"EDIT", L"未设置筛选条件",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_READONLY,
+            95, 240, 425, 26, hWnd, (HMENU)ID_BACKUP_FILTER, g_hInst, nullptr);
+        g_hBackupFilterBtn = CreateWindowW(L"BUTTON", L"配置筛选...",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            530, 240, 125, 26, hWnd, (HMENU)ID_BACKUP_FILTER_BTN, g_hInst, nullptr);
 
         g_hBtnPack = CreateWindowW(L"BUTTON", L"开始备份",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -543,6 +890,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
+        case ID_BACKUP_FILTER_BTN:
+            ShowFilterDialog();
+            return 0;
         // ── 打包：选择保存路径 ──
         case ID_BACKUP_DST_BTN: {
             std::wstring file = BrowseForSaveFile(L"选择备份文件保存位置");
@@ -649,6 +999,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.lpszClassName = L"BackupToolWnd";
     wc.hIcon         = LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassExW(&wc);
+
+    WNDCLASSEXW filterClass = {};
+    filterClass.cbSize = sizeof(filterClass);
+    filterClass.lpfnWndProc = FilterDialogProc;
+    filterClass.hInstance = hInstance;
+    filterClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    filterClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    filterClass.lpszClassName = L"DBackupFilterWindow";
+    RegisterClassExW(&filterClass);
 
     // 创建主窗口
     int winW = 700, winH = 610;
