@@ -344,6 +344,154 @@ TEST_F(PackerTest, FilterByExtensionAndSize) {
     EXPECT_EQ(entries[0].relativePath, "keep.txt");
 }
 
+/** Sprint 2: filter expressions reject invalid values instead of silently ignoring them. */
+TEST(FilterOptionsTest, StrictValidation) {
+    FilterOptions filter;
+    std::string error;
+
+    ASSERT_TRUE(ParseFilterOptions(
+        " type = file ; ext = .txt ; minsize = 10 ; maxsize = 20 ; "
+        "after = 2026-01-01 ; before = 2026-01-31 ", filter, error)) << error;
+    EXPECT_EQ(filter.type, EntryTypeFilter::FilesOnly);
+    EXPECT_EQ(filter.extension, ".txt");
+    EXPECT_EQ(filter.minSize, 10u);
+    EXPECT_EQ(filter.maxSize, 20u);
+    EXPECT_LT(filter.afterMtimeMs, filter.beforeMtimeMs);
+
+    EXPECT_FALSE(ParseFilterOptions("minsize=abc", filter, error));
+    EXPECT_NE(error.find("minsize"), std::string::npos);
+    EXPECT_FALSE(ParseFilterOptions("after=2026-02-30", filter, error));
+    EXPECT_FALSE(ParseFilterOptions("type=image", filter, error));
+    EXPECT_FALSE(ParseFilterOptions("unknown=value", filter, error));
+    EXPECT_FALSE(ParseFilterOptions("minsize=20;maxsize=10", filter, error));
+}
+
+/** Sprint 1: Windows file attributes are preserved by the v2 round trip. */
+TEST_F(PackerTest, FileAttributesRestoration) {
+    std::string error;
+    const std::string source = srcDir + "\\readonly.txt";
+    WriteFile(source, "attributes");
+    ASSERT_TRUE(SetFileAttributesA(source.c_str(), FILE_ATTRIBUTE_READONLY));
+
+    PackOptions options;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+    ASSERT_TRUE(Packer::unpack(abkFile, dstDir, error)) << error;
+
+    DWORD attributes = GetFileAttributesA((dstDir + "\\readonly.txt").c_str());
+    ASSERT_NE(attributes, INVALID_FILE_ATTRIBUTES);
+    EXPECT_NE(attributes & FILE_ATTRIBUTE_READONLY, 0u);
+
+    // Allow the fixture cleanup to remove both files.
+    SetFileAttributesA(source.c_str(), FILE_ATTRIBUTE_NORMAL);
+    SetFileAttributesA((dstDir + "\\readonly.txt").c_str(), FILE_ATTRIBUTE_NORMAL);
+}
+
+/** Sprint 2: corruption of an unencrypted v2 archive is detected by SHA-256. */
+TEST_F(PackerTest, DetectsArchiveTampering) {
+    std::string error;
+    WriteFile(srcDir + "\\data.txt", std::string(4096, 'A'));
+    PackOptions options;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+
+    std::fstream archive(abkFile, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(archive.is_open());
+    archive.seekg(30, std::ios::beg);
+    char value = 0;
+    archive.read(&value, 1);
+    ASSERT_TRUE(archive.good());
+    value ^= 0x01;
+    archive.seekp(30, std::ios::beg);
+    archive.write(&value, 1);
+    archive.close();
+
+    std::vector<ArchiveEntry> entries;
+    EXPECT_FALSE(Packer::readArchive(abkFile, entries, error));
+    EXPECT_NE(error.find("校验失败"), std::string::npos);
+}
+
+/** Sprint 1/2: replacing an existing archive still produces a valid final file. */
+TEST_F(PackerTest, AtomicallyReplacesExistingArchive) {
+    std::string error;
+    WriteFile(srcDir + "\\new.txt", "new data");
+    WriteFile(abkFile, "old invalid archive");
+
+    PackOptions options;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+    std::vector<ArchiveEntry> entries;
+    ASSERT_TRUE(Packer::readArchive(abkFile, entries, error)) << error;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].data, "new data");
+}
+
+/** The destination archive is excluded when it is saved inside the source directory. */
+TEST_F(PackerTest, ExcludesDestinationArchiveFromSource) {
+    std::string error;
+    WriteFile(srcDir + "\\data.txt", "data");
+    abkFile = srcDir + "\\inside.abk";
+    PackOptions options;
+
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, options, error)) << error;
+
+    std::vector<ArchiveEntry> entries;
+    ASSERT_TRUE(Packer::readArchive(abkFile, entries, error)) << error;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].relativePath, "data.txt");
+}
+
+/** A single file can be selected as the complete backup source. */
+TEST_F(PackerTest, SingleFileAsBackupSource) {
+    std::string error;
+    const std::string sourceFile = srcDir + "\\selected.txt";
+    WriteFile(sourceFile, "selected file only");
+    PackOptions options;
+
+    ASSERT_TRUE(Packer::pack(sourceFile, abkFile, options, error)) << error;
+    std::vector<ArchiveEntry> entries;
+    ASSERT_TRUE(Packer::readArchive(abkFile, entries, error)) << error;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].relativePath, "selected.txt");
+    EXPECT_EQ(entries[0].data, "selected file only");
+
+    ASSERT_TRUE(Packer::unpack(abkFile, dstDir, error)) << error;
+    EXPECT_EQ(ReadFile(dstDir + "\\selected.txt"), "selected file only");
+}
+
+/** The source file and output archive must not be the same path. */
+TEST_F(PackerTest, RejectsSourceEqualToDestination) {
+    std::string error;
+    const std::string sourceFile = srcDir + "\\same.abk";
+    WriteFile(sourceFile, "do not overwrite");
+    PackOptions options;
+
+    EXPECT_FALSE(Packer::pack(sourceFile, sourceFile, options, error));
+    EXPECT_NE(error.find("不能同时"), std::string::npos);
+    EXPECT_EQ(ReadFile(sourceFile), "do not overwrite");
+}
+
+/** Multiple files and folders can be combined into one archive. */
+TEST_F(PackerTest, MultipleBackupSources) {
+    std::string error;
+    const std::string first = srcDir + "\\first.txt";
+    const std::string second = srcDir + "\\second.bin";
+    const std::string folder = srcDir + "\\folder";
+    WriteFile(first, "first");
+    WriteFile(second, "second");
+    WriteFile(folder + "\\nested.txt", "nested");
+    PackOptions options;
+
+    ASSERT_TRUE(Packer::pack(std::vector<std::string>{first, second, folder},
+                             abkFile, options, error)) << error;
+    std::vector<ArchiveEntry> entries;
+    ASSERT_TRUE(Packer::readArchive(abkFile, entries, error)) << error;
+    ASSERT_EQ(entries.size(), 3u);  // two files and one nested file (parent is created on restore)
+
+    ASSERT_TRUE(Packer::unpack(abkFile, dstDir, error)) << error;
+    EXPECT_EQ(ReadFile(dstDir + "\\first.txt"), "first");
+    EXPECT_EQ(ReadFile(dstDir + "\\second.bin"), "second");
+    EXPECT_EQ(ReadFile(dstDir + "\\folder\\nested.txt"), "nested");
+}
+
 // ═══════════════════ main ═══════════════════
 
 int main(int argc, char **argv) {

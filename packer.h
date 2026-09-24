@@ -36,20 +36,27 @@ struct ArchiveEntry {
     uint8_t     type;           // 0 = file, 1 = directory
     uint8_t     flags = 0;      // v2: bit 0 = compressed payload
     std::string relativePath;   // UTF-8 relative path
-    uint32_t    mode = 0;       // reserved for permissions
+    uint32_t    mode = 0;       // Windows file attributes (v2); legacy v1 may be 0
     int64_t     mtimeMs = 0;    // modification time in milliseconds
     std::string owner;          // UTF-8 owner name, if available
     uint64_t    originalSize = 0;
     std::string data;           // decoded file data; empty for directories
 };
 
+/** Parse the GUI filter expression. Returns false for unknown keys or invalid values. */
+bool ParseFilterOptions(const std::string &spec, FilterOptions &filter, std::string &error);
+
 class Packer {
  public:
-    /** Pack a directory using the legacy, uncompressed and unencrypted format. */
-    static bool pack(const std::string &sourceDir, const std::string &destFile, std::string &error);
+    /** Pack one file or a directory using the legacy, uncompressed and unencrypted format. */
+    static bool pack(const std::string &sourcePath, const std::string &destFile, std::string &error);
 
     /** Sprint 2: pack with compression, optional password encryption and filters. */
-    static bool pack(const std::string &sourceDir, const std::string &destFile,
+    static bool pack(const std::string &sourcePath, const std::string &destFile,
+                     const PackOptions &options, std::string &error);
+
+    /** Pack multiple files and/or directories into one v2 archive. */
+    static bool pack(const std::vector<std::string> &sourcePaths, const std::string &destFile,
                      const PackOptions &options, std::string &error);
 
     /** Read a v1/v2 archive. v2 encrypted archives require a password. */

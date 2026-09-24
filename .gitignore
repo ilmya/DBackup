@@ -2,6 +2,11 @@
 build/
 out/
 cmake-build-*/
+tmp/
+install/
+package/
+_deps/
+*.zip
 
 # IDE 临时文件
 .vscode/.browse.c_cpp.db

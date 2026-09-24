@@ -14,11 +14,18 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
+#include <cstdlib>
+#include <ctime>
+#include <cwctype>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <iomanip>
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 
 namespace {
@@ -82,7 +89,7 @@ void AppendI64(std::vector<uint8_t> &out, int64_t value) {
 }
 
 bool Take(const std::vector<uint8_t> &in, size_t &pos, void *dst, size_t size) {
-    if (size > in.size() - pos) return false;
+    if (pos > in.size() || size > in.size() - pos) return false;
     std::memcpy(dst, in.data() + pos, size);
     pos += size;
     return true;
@@ -135,24 +142,70 @@ bool WriteU32(std::ofstream &out, uint32_t value) {
     return static_cast<bool>(out);
 }
 
-std::string ReadWholeFile(const std::string &path) {
+bool ReadWholeFile(const std::string &path, std::string &data, std::string &error) {
     std::ifstream file(path, std::ios::binary);
-    if (!file) return {};
-    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (!file) {
+        error = "无法读取文件: " + path;
+        return false;
+    }
+    data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (file.bad()) {
+        error = "读取文件失败: " + path;
+        return false;
+    }
+    return true;
 }
 
-bool WriteWholeFile(const std::string &path, const std::string &data, std::string &error) {
-    std::ofstream file(path, std::ios::binary);
+std::wstring AbsolutePath(const std::string &path) {
+    std::wstring wide = UtoW(path);
+    DWORD size = GetFullPathNameW(wide.c_str(), 0, nullptr, nullptr);
+    if (size == 0) return wide;
+    std::wstring result(size, L'\0');
+    DWORD written = GetFullPathNameW(wide.c_str(), size, result.data(), nullptr);
+    if (written == 0 || written >= size) return wide;
+    result.resize(written);
+    std::replace(result.begin(), result.end(), L'/', L'\\');
+    std::transform(result.begin(), result.end(), result.begin(),
+                   [](wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
+    return result;
+}
+
+std::string TemporaryPath(const std::string &path) {
+    return path + ".tmp." + std::to_string(GetCurrentProcessId()) + "." +
+           std::to_string(GetCurrentThreadId());
+}
+
+bool ReplaceFile(const std::string &temporary, const std::string &destination, std::string &error) {
+    if (!MoveFileExW(UtoW(temporary).c_str(), UtoW(destination).c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(UtoW(temporary).c_str());
+        error = "无法提交输出文件: " + destination;
+        return false;
+    }
+    return true;
+}
+
+bool WriteWholeFileAtomic(const std::string &path, const std::string &data, std::string &error) {
+    const std::string temporary = TemporaryPath(path);
+    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
     if (!file) {
         error = "无法创建文件: " + path;
         return false;
     }
     file.write(data.data(), static_cast<std::streamsize>(data.size()));
     if (!file) {
+        file.close();
+        DeleteFileW(UtoW(temporary).c_str());
         error = "写入文件失败: " + path;
         return false;
     }
-    return true;
+    file.close();
+    if (!file) {
+        DeleteFileW(UtoW(temporary).c_str());
+        error = "写入文件失败: " + path;
+        return false;
+    }
+    return ReplaceFile(temporary, path, error);
 }
 
 std::string OwnerName(const std::wstring &path) {
@@ -182,14 +235,18 @@ struct DirItem {
     uint64_t size = 0;
     int64_t mtimeMs = 0;
     std::string owner;
+    uint32_t attributes = 0;
 };
 
-std::vector<DirItem> ListDirectory(const std::string &dir) {
-    std::vector<DirItem> items;
+bool ListDirectory(const std::string &dir, std::vector<DirItem> &items, std::string &error) {
+    items.clear();
     std::wstring pattern = UtoW(dir) + L"\\*";
     WIN32_FIND_DATAW fd;
     HANDLE handle = FindFirstFileW(pattern.c_str(), &fd);
-    if (handle == INVALID_HANDLE_VALUE) return items;
+    if (handle == INVALID_HANDLE_VALUE) {
+        error = "无法读取目录: " + dir;
+        return false;
+    }
     do {
         std::wstring name(fd.cFileName);
         if (name == L"." || name == L"..") continue;
@@ -199,11 +256,22 @@ std::vector<DirItem> ListDirectory(const std::string &dir) {
         item.size = (static_cast<uint64_t>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
         item.mtimeMs = FileTimeToMs(fd.ftLastWriteTime);
         item.owner = OwnerName(UtoW(dir + "\\" + item.name));
+        item.attributes = fd.dwFileAttributes;
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            FindClose(handle);
+            error = "暂不支持符号链接或重解析点: " + dir + "\\" + item.name;
+            return false;
+        }
         items.push_back(std::move(item));
     } while (FindNextFileW(handle, &fd));
+    DWORD findError = GetLastError();
     FindClose(handle);
+    if (findError != ERROR_NO_MORE_FILES) {
+        error = "扫描目录时发生错误: " + dir;
+        return false;
+    }
     std::sort(items.begin(), items.end(), [](const DirItem &a, const DirItem &b) { return a.name < b.name; });
-    return items;
+    return true;
 }
 
 bool CreateDirRecursive(const std::string &dir) {
@@ -246,9 +314,14 @@ bool Matches(const DirItem &item, const std::string &relativePath, const FilterO
     return true;
 }
 
-void CollectEntries(const std::string &dir, const std::string &base, const FilterOptions &filter,
-                    std::vector<ArchiveEntry> &entries) {
-    for (const auto &item : ListDirectory(dir)) {
+bool CollectEntries(const std::string &dir, const std::string &base, const FilterOptions &filter,
+                    const std::wstring &excludedPath, std::vector<ArchiveEntry> &entries,
+                    std::string &error) {
+    std::vector<DirItem> items;
+    if (!ListDirectory(dir, items, error)) return false;
+    for (const auto &item : items) {
+        const std::string sourcePath = dir + "\\" + item.name;
+        if (!excludedPath.empty() && AbsolutePath(sourcePath) == excludedPath) continue;
         const std::string relative = JoinPath(base, item.name);
         if (Matches(item, relative, filter)) {
             ArchiveEntry entry;
@@ -256,12 +329,91 @@ void CollectEntries(const std::string &dir, const std::string &base, const Filte
             entry.relativePath = relative;
             entry.mtimeMs = item.mtimeMs;
             entry.owner = item.owner;
+            entry.mode = item.attributes;
             entry.originalSize = item.isDir ? 0 : item.size;
-            if (!item.isDir) entry.data = ReadWholeFile(dir + "\\" + item.name);
+            if (!item.isDir && !ReadWholeFile(sourcePath, entry.data, error)) return false;
             entries.push_back(std::move(entry));
         }
-        if (item.isDir) CollectEntries(dir + "\\" + item.name, relative, filter, entries);
+        if (item.isDir && !CollectEntries(sourcePath, relative, filter, excludedPath, entries, error)) return false;
     }
+    return true;
+}
+
+bool CollectSource(const std::string &sourcePath, const std::string &destFile,
+                   const FilterOptions &filter, bool includeDirectoryRoot,
+                   std::vector<ArchiveEntry> &entries, std::string &error) {
+    const std::wstring sourceWide = UtoW(sourcePath);
+    DWORD attributes = GetFileAttributesW(sourceWide.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        error = "备份源不存在: " + sourcePath;
+        return false;
+    }
+    if (AbsolutePath(sourcePath) == AbsolutePath(destFile)) {
+        error = "备份源文件不能同时作为备份输出文件";
+        return false;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        error = "暂不支持符号链接或重解析点: " + sourcePath;
+        return false;
+    }
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        size_t slash = sourceWide.find_last_of(L"\\/");
+        std::string rootName = WtoU(slash == std::wstring::npos ? sourceWide : sourceWide.substr(slash + 1));
+        return CollectEntries(sourcePath, includeDirectoryRoot ? rootName : "", filter,
+                              AbsolutePath(destFile), entries, error);
+    }
+
+    WIN32_FILE_ATTRIBUTE_DATA data = {};
+    if (!GetFileAttributesExW(sourceWide.c_str(), GetFileExInfoStandard, &data)) {
+        error = "无法读取文件信息: " + sourcePath;
+        return false;
+    }
+    size_t slash = sourceWide.find_last_of(L"\\/");
+    std::string name = WtoU(slash == std::wstring::npos ? sourceWide : sourceWide.substr(slash + 1));
+    DirItem item;
+    item.name = name;
+    item.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+    item.mtimeMs = FileTimeToMs(data.ftLastWriteTime);
+    item.owner = OwnerName(sourceWide);
+    item.attributes = data.dwFileAttributes;
+    if (!Matches(item, name, filter)) return true;
+
+    ArchiveEntry entry;
+    entry.type = 0;
+    entry.relativePath = name;
+    entry.mode = item.attributes;
+    entry.mtimeMs = item.mtimeMs;
+    entry.owner = item.owner;
+    entry.originalSize = item.size;
+    if (!ReadWholeFile(sourcePath, entry.data, error)) return false;
+    entries.push_back(std::move(entry));
+    return true;
+}
+
+bool CollectSources(const std::vector<std::string> &sourcePaths, const std::string &destFile,
+                    const FilterOptions &filter, std::vector<ArchiveEntry> &entries,
+                    std::string &error) {
+    if (sourcePaths.empty()) {
+        error = "请至少选择一个备份来源";
+        return false;
+    }
+    const bool multiple = sourcePaths.size() > 1;
+    std::unordered_set<std::wstring> uniqueSources;
+    for (const auto &sourcePath : sourcePaths) {
+        const std::wstring absolute = AbsolutePath(sourcePath);
+        if (!uniqueSources.insert(absolute).second) continue;
+        if (!CollectSource(sourcePath, destFile, filter, multiple, entries, error)) return false;
+    }
+    std::unordered_set<std::string> archivePaths;
+    for (const auto &entry : entries) {
+        std::string normalized = Lower(entry.relativePath);
+        std::replace(normalized.begin(), normalized.end(), '\\', '/');
+        if (!archivePaths.insert(normalized).second) {
+            error = "多个备份来源在归档中产生同名路径: " + entry.relativePath;
+            return false;
+        }
+    }
+    return true;
 }
 
 bool Compress(const std::string &input, int level, std::string &output) {
@@ -522,61 +674,178 @@ bool ReadFileBytes(const std::string &path, std::vector<uint8_t> &bytes) {
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
     bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    return true;
+    return !file.bad();
 }
 
-bool PackLegacy(const std::string &sourceDir, const std::string &destFile, std::string &error) {
-    DWORD attr = GetFileAttributesW(UtoW(sourceDir).c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        error = "源目录不存在: " + sourceDir;
-        return false;
-    }
-    FilterOptions filter;
-    std::vector<ArchiveEntry> entries;
-    CollectEntries(sourceDir, "", filter, entries);
-    std::ofstream out(destFile, std::ios::binary);
+bool WriteArchiveAtomic(const std::string &destFile,
+                        const std::function<bool(std::ofstream &)> &writer,
+                        std::string &error) {
+    const std::string temporary = TemporaryPath(destFile);
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
     if (!out) {
         error = "无法创建备份文件: " + destFile;
         return false;
     }
-    out.write(kMagic, sizeof(kMagic));
-    if (!WriteU16(out, kVersion1) || !WriteU32(out, static_cast<uint32_t>(entries.size()))) return false;
-    uint8_t reserved[8] = {};
-    out.write(reinterpret_cast<const char *>(reserved), sizeof(reserved));
-    for (const auto &entry : entries) {
-        uint8_t type = entry.type;
-        out.write(reinterpret_cast<const char *>(&type), 1);
-        if (!WriteU32(out, static_cast<uint32_t>(entry.relativePath.size()))) return false;
-        out.write(entry.relativePath.data(), static_cast<std::streamsize>(entry.relativePath.size()));
-        if (!WriteU32(out, entry.mode)) return false;
-        uint64_t rawTime = static_cast<uint64_t>(entry.mtimeMs);
-        out.write(reinterpret_cast<const char *>(&rawTime), sizeof(rawTime));
-        uint64_t dataSize = entry.data.size();
-        out.write(reinterpret_cast<const char *>(&dataSize), sizeof(dataSize));
-        out.write(entry.data.data(), static_cast<std::streamsize>(entry.data.size()));
+    if (!writer(out) || !out) {
+        out.close();
+        DeleteFileW(UtoW(temporary).c_str());
+        if (error.empty()) error = "写入备份文件失败: " + destFile;
+        return false;
     }
+    out.close();
     if (!out) {
+        DeleteFileW(UtoW(temporary).c_str());
         error = "写入备份文件失败: " + destFile;
+        return false;
+    }
+    return ReplaceFile(temporary, destFile, error);
+}
+
+bool PackLegacy(const std::string &sourcePath, const std::string &destFile, std::string &error) {
+    FilterOptions filter;
+    std::vector<ArchiveEntry> entries;
+    if (!CollectSource(sourcePath, destFile, filter, false, entries, error)) return false;
+    return WriteArchiveAtomic(destFile, [&](std::ofstream &out) {
+        out.write(kMagic, sizeof(kMagic));
+        if (!WriteU16(out, kVersion1) || !WriteU32(out, static_cast<uint32_t>(entries.size()))) return false;
+        uint8_t reserved[8] = {};
+        out.write(reinterpret_cast<const char *>(reserved), sizeof(reserved));
+        for (const auto &entry : entries) {
+            uint8_t type = entry.type;
+            out.write(reinterpret_cast<const char *>(&type), 1);
+            if (!WriteU32(out, static_cast<uint32_t>(entry.relativePath.size()))) return false;
+            out.write(entry.relativePath.data(), static_cast<std::streamsize>(entry.relativePath.size()));
+            if (!WriteU32(out, entry.mode)) return false;
+            uint64_t rawTime = static_cast<uint64_t>(entry.mtimeMs);
+            out.write(reinterpret_cast<const char *>(&rawTime), sizeof(rawTime));
+            uint64_t dataSize = entry.data.size();
+            out.write(reinterpret_cast<const char *>(&dataSize), sizeof(dataSize));
+            out.write(entry.data.data(), static_cast<std::streamsize>(entry.data.size()));
+        }
+        return static_cast<bool>(out);
+    }, error);
+}
+
+}  // namespace
+
+bool ParseFilterOptions(const std::string &spec, FilterOptions &filter, std::string &error) {
+    filter = FilterOptions{};
+    error.clear();
+    auto trim = [](std::string value) {
+        const char *spaces = " \t\r\n";
+        size_t first = value.find_first_not_of(spaces);
+        if (first == std::string::npos) return std::string{};
+        size_t last = value.find_last_not_of(spaces);
+        return value.substr(first, last - first + 1);
+    };
+    auto parseSize = [&](const std::string &value, uint64_t &target, const std::string &key) {
+        if (value.empty() || value[0] == '-') {
+            error = "筛选项 " + key + " 必须是非负整数";
+            return false;
+        }
+        errno = 0;
+        char *end = nullptr;
+        unsigned long long number = std::strtoull(value.c_str(), &end, 10);
+        if (errno == ERANGE || end == value.c_str() || *end != '\0') {
+            error = "筛选项 " + key + " 必须是非负整数";
+            return false;
+        }
+        target = static_cast<uint64_t>(number);
+        return true;
+    };
+    auto parseDate = [&](const std::string &value, int64_t &target, const std::string &key, bool endOfDay) {
+        std::tm tm = {};
+        std::istringstream input(value);
+        input >> std::get_time(&tm, "%Y-%m-%d");
+        if (input.fail() || input.peek() != std::char_traits<char>::eof()) {
+            error = "筛选项 " + key + " 的日期格式应为 YYYY-MM-DD";
+            return false;
+        }
+        const int expectedYear = tm.tm_year;
+        const int expectedMonth = tm.tm_mon;
+        const int expectedDay = tm.tm_mday;
+        time_t seconds = _mkgmtime(&tm);
+        if (seconds == static_cast<time_t>(-1)) {
+            error = "筛选项 " + key + " 的日期无效";
+            return false;
+        }
+        std::tm check = {};
+        gmtime_s(&check, &seconds);
+        if (check.tm_year != expectedYear || check.tm_mon != expectedMonth || check.tm_mday != expectedDay) {
+            error = "筛选项 " + key + " 的日期无效";
+            return false;
+        }
+        target = static_cast<int64_t>(seconds) * 1000 + (endOfDay ? 86399999LL : 0LL);
+        return true;
+    };
+
+    std::stringstream stream(spec);
+    std::string part;
+    while (std::getline(stream, part, ';')) {
+        part = trim(part);
+        if (part.empty()) continue;
+        size_t equal = part.find('=');
+        if (equal == std::string::npos) {
+            error = "筛选项缺少等号: " + part;
+            return false;
+        }
+        std::string key = Lower(trim(part.substr(0, equal)));
+        std::string value = trim(part.substr(equal + 1));
+        if (key.empty() || value.empty()) {
+            error = "筛选项的名称和值不能为空: " + part;
+            return false;
+        }
+        if (key == "path") filter.pathContains = value;
+        else if (key == "name") filter.nameContains = value;
+        else if (key == "ext" || key == "extension") filter.extension = value;
+        else if (key == "owner" || key == "user") filter.ownerContains = value;
+        else if (key == "type") {
+            std::string type = Lower(value);
+            if (type == "file" || type == "files") filter.type = EntryTypeFilter::FilesOnly;
+            else if (type == "dir" || type == "directory" || type == "directories") {
+                filter.type = EntryTypeFilter::DirectoriesOnly;
+            } else {
+                error = "筛选项 type 只支持 file 或 dir";
+                return false;
+            }
+        } else if (key == "minsize") {
+            if (!parseSize(value, filter.minSize, key)) return false;
+        } else if (key == "maxsize") {
+            if (!parseSize(value, filter.maxSize, key)) return false;
+        } else if (key == "after") {
+            if (!parseDate(value, filter.afterMtimeMs, key, false)) return false;
+        } else if (key == "before") {
+            if (!parseDate(value, filter.beforeMtimeMs, key, true)) return false;
+        } else {
+            error = "未知筛选项: " + key;
+            return false;
+        }
+    }
+    if (filter.minSize != 0 && filter.maxSize != 0 && filter.minSize > filter.maxSize) {
+        error = "minsize 不能大于 maxsize";
+        return false;
+    }
+    if (filter.afterMtimeMs != 0 && filter.beforeMtimeMs != 0 &&
+        filter.afterMtimeMs > filter.beforeMtimeMs) {
+        error = "after 不能晚于 before";
         return false;
     }
     return true;
 }
 
-}  // namespace
-
-bool Packer::pack(const std::string &sourceDir, const std::string &destFile, std::string &error) {
-    return PackLegacy(sourceDir, destFile, error);
+bool Packer::pack(const std::string &sourcePath, const std::string &destFile, std::string &error) {
+    return PackLegacy(sourcePath, destFile, error);
 }
 
-bool Packer::pack(const std::string &sourceDir, const std::string &destFile,
+bool Packer::pack(const std::string &sourcePath, const std::string &destFile,
+                   const PackOptions &options, std::string &error) {
+    return pack(std::vector<std::string>{sourcePath}, destFile, options, error);
+}
+
+bool Packer::pack(const std::vector<std::string> &sourcePaths, const std::string &destFile,
                   const PackOptions &options, std::string &error) {
-    DWORD attr = GetFileAttributesW(UtoW(sourceDir).c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        error = "源目录不存在: " + sourceDir;
-        return false;
-    }
     std::vector<ArchiveEntry> entries;
-    CollectEntries(sourceDir, "", options.filter, entries);
+    if (!CollectSources(sourcePaths, destFile, options.filter, entries, error)) return false;
     if (entries.size() > std::numeric_limits<uint32_t>::max()) {
         error = "归档条目数量超出格式限制";
         return false;
@@ -594,27 +863,17 @@ bool Packer::pack(const std::string &sourceDir, const std::string &destFile,
     } else {
         storedBody = std::move(body);
     }
-    std::ofstream out(destFile, std::ios::binary);
-    if (!out) {
-        error = "无法创建备份文件: " + destFile;
-        return false;
-    }
-    out.write(kMagic, sizeof(kMagic));
-    if (!WriteU16(out, kVersion2) || !WriteU32(out, static_cast<uint32_t>(entries.size())) ||
-        !WriteU32(out, flags) || !WriteU32(out, 0)) {
-        error = "写入归档头失败";
-        return false;
-    }
-    if (flags != 0) {
-        out.write(reinterpret_cast<const char *>(salt.data()), static_cast<std::streamsize>(salt.size()));
-        out.write(reinterpret_cast<const char *>(iv.data()), static_cast<std::streamsize>(iv.size()));
-    }
-    out.write(reinterpret_cast<const char *>(storedBody.data()), static_cast<std::streamsize>(storedBody.size()));
-    if (!out) {
-        error = "写入备份文件失败: " + destFile;
-        return false;
-    }
-    return true;
+    return WriteArchiveAtomic(destFile, [&](std::ofstream &out) {
+        out.write(kMagic, sizeof(kMagic));
+        if (!WriteU16(out, kVersion2) || !WriteU32(out, static_cast<uint32_t>(entries.size())) ||
+            !WriteU32(out, flags) || !WriteU32(out, 0)) return false;
+        if (flags != 0) {
+            out.write(reinterpret_cast<const char *>(salt.data()), static_cast<std::streamsize>(salt.size()));
+            out.write(reinterpret_cast<const char *>(iv.data()), static_cast<std::streamsize>(iv.size()));
+        }
+        out.write(reinterpret_cast<const char *>(storedBody.data()), static_cast<std::streamsize>(storedBody.size()));
+        return static_cast<bool>(out);
+    }, error);
 }
 
 bool Packer::readArchive(const std::string &archiveFile, std::vector<ArchiveEntry> &entries, std::string &error) {
@@ -706,15 +965,17 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
                     std::string &error, const std::string &password) {
     std::vector<ArchiveEntry> entries;
     if (!readArchive(archiveFile, entries, error, password)) return false;
-    if (!CreateDirRecursive(destDir)) {
-        error = "无法创建还原目录: " + destDir;
-        return false;
-    }
     for (const auto &entry : entries) {
         if (!IsSafeRelativePath(entry.relativePath)) {
             error = "归档包含不安全路径: " + entry.relativePath;
             return false;
         }
+    }
+    if (!CreateDirRecursive(destDir)) {
+        error = "无法创建还原目录: " + destDir;
+        return false;
+    }
+    for (const auto &entry : entries) {
         std::string fullPath = destDir + "\\" + entry.relativePath;
         std::replace(fullPath.begin(), fullPath.end(), '/', '\\');
         if (entry.type == 1) {
@@ -728,7 +989,7 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
                 error = "无法创建父目录: " + fullPath;
                 return false;
             }
-            if (!WriteWholeFile(fullPath, entry.data, error)) return false;
+            if (!WriteWholeFileAtomic(fullPath, entry.data, error)) return false;
         }
         HANDLE handle = CreateFileW(UtoW(fullPath).c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr, OPEN_EXISTING,
                                     entry.type == 1 ? FILE_FLAG_BACKUP_SEMANTICS : 0, nullptr);
@@ -736,6 +997,14 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
             FILETIME ft = MsToFileTime(entry.mtimeMs);
             SetFileTime(handle, nullptr, nullptr, &ft);
             CloseHandle(handle);
+        }
+        if (entry.mode != 0) {
+            DWORD attributes = entry.mode & ~(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT);
+            if (attributes == 0) attributes = FILE_ATTRIBUTE_NORMAL;
+            if (!SetFileAttributesW(UtoW(fullPath).c_str(), attributes)) {
+                error = "无法恢复文件属性: " + fullPath;
+                return false;
+            }
         }
     }
     return true;

@@ -3,8 +3,8 @@
 /**
  * main.cpp — Win32 API 图形界面
  *
- * 极简三按钮布局：
- *   Tab 1 "打包备份": 选择源目录 → 选择备份路径 → 开始备份
+ * 简洁备份布局：
+ *   Tab 1 "打包备份": 选择源文件或目录 → 选择备份路径 → 开始备份
  *   Tab 2 "还原解包": 选择备份文件 → 选择还原目录 → 开始还原
  */
 
@@ -14,12 +14,23 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef WINVER
+#define WINVER 0x0600
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x06000000
+#endif
 
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <commctrl.h>
 #include <string>
+#include <vector>
 #include <codecvt>
 #include <locale>
 #include <sstream>
@@ -43,6 +54,7 @@ enum CtrlID {
     ID_BTN_PACK       = 205,
     ID_BACKUP_PASSWORD = 206,
     ID_BACKUP_FILTER   = 207,
+    ID_BACKUP_REMOVE_BTN = 208,
     // 还原面板
     ID_RESTORE_SRC     = 301,
     ID_RESTORE_SRC_BTN = 302,
@@ -61,6 +73,7 @@ static HWND g_hTab        = nullptr;
 // 打包面板控件
 static HWND g_hBackupSrc    = nullptr;
 static HWND g_hBackupSrcBtn = nullptr;
+static HWND g_hBackupRemoveBtn = nullptr;
 static HWND g_hBackupDst    = nullptr;
 static HWND g_hBackupDstBtn = nullptr;
 static HWND g_hBtnPack      = nullptr;
@@ -82,6 +95,7 @@ static HWND g_hRestorePasswordLabel = nullptr;
 static HWND g_hRestorePassword = nullptr;
 // 日志
 static HWND g_hLog = nullptr;
+static std::vector<std::wstring> g_backupSources;
 
 // ═══════════════════ 字符串转换 ═══════════════════
 
@@ -124,6 +138,7 @@ static void ShowBackupPanel(bool show) {
     ShowWindow(g_hBackupFilterLabel, cmd);
     ShowWindow(g_hBackupSrc,    cmd);
     ShowWindow(g_hBackupSrcBtn, cmd);
+    ShowWindow(g_hBackupRemoveBtn, cmd);
     ShowWindow(g_hBackupDst,    cmd);
     ShowWindow(g_hBackupDstBtn, cmd);
     ShowWindow(g_hBtnPack,      cmd);
@@ -158,42 +173,16 @@ static bool AreBothSet(HWND h1, HWND h2) {
     return GetWindowTextLengthW(h1) > 0 && GetWindowTextLengthW(h2) > 0;
 }
 
-static int64_t ParseDateMs(const std::string &value) {
-    std::tm tm = {};
-    std::istringstream input(value);
-    input >> std::get_time(&tm, "%Y-%m-%d");
-    if (input.fail()) return 0;
-    return static_cast<int64_t>(_mkgmtime(&tm)) * 1000;
+static bool CanStartBackup() {
+    return !g_backupSources.empty() && GetWindowTextLengthW(g_hBackupDst) > 0;
 }
 
-static void ParseFilterSpec(const std::wstring &text, FilterOptions &filter) {
-    std::string spec = WtoU(text);
-    std::stringstream stream(spec);
-    std::string part;
-    while (std::getline(stream, part, ';')) {
-        size_t equal = part.find('=');
-        if (equal == std::string::npos) continue;
-        std::string key = part.substr(0, equal);
-        std::string value = part.substr(equal + 1);
-        std::transform(key.begin(), key.end(), key.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        std::string typeValue = value;
-        std::transform(typeValue.begin(), typeValue.end(), typeValue.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (key == "path") filter.pathContains = value;
-        else if (key == "name") filter.nameContains = value;
-        else if (key == "ext" || key == "extension") filter.extension = value;
-        else if (key == "owner" || key == "user") filter.ownerContains = value;
-        else if (key == "type") {
-            if (typeValue == "file" || typeValue == "files") filter.type = EntryTypeFilter::FilesOnly;
-            else if (typeValue == "dir" || typeValue == "directory" || typeValue == "directories") {
-                filter.type = EntryTypeFilter::DirectoriesOnly;
-            }
-        } else if (key == "minsize") filter.minSize = std::strtoull(value.c_str(), nullptr, 10);
-        else if (key == "maxsize") filter.maxSize = std::strtoull(value.c_str(), nullptr, 10);
-        else if (key == "after") filter.afterMtimeMs = ParseDateMs(value);
-        else if (key == "before") filter.beforeMtimeMs = ParseDateMs(value);
+static void RefreshBackupSources() {
+    SendMessageW(g_hBackupSrc, LB_RESETCONTENT, 0, 0);
+    for (const auto &source : g_backupSources) {
+        SendMessageW(g_hBackupSrc, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(source.c_str()));
     }
+    EnableWindow(g_hBtnPack, CanStartBackup());
 }
 
 // ═══════════════════ 日志 ═══════════════════
@@ -218,57 +207,116 @@ static void LogError(const std::wstring &msg)  { AppendLog(L"✘ " + msg, RGB(22
 
 // ═══════════════════ 文件对话框 ═══════════════════
 
-static std::wstring BrowseForFolder(const wchar_t *title) {
-    wchar_t path[MAX_PATH] = {};
-    BROWSEINFOW bi = {};
-    bi.hwndOwner = g_hWnd;
-    bi.lpszTitle = title;
-    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (pidl) {
-        SHGetPathFromIDListW(pidl, path);
-        CoTaskMemFree(pidl);
-        return std::wstring(path);
+static std::wstring GetDialogPath(IFileDialog *dialog) {
+    IShellItem *item = nullptr;
+    if (FAILED(dialog->GetResult(&item))) return L"";
+    PWSTR rawPath = nullptr;
+    std::wstring result;
+    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &rawPath))) {
+        result = rawPath;
+        CoTaskMemFree(rawPath);
     }
-    return L"";
+    item->Release();
+    return result;
 }
 
-static std::wstring BrowseForSaveFile(const wchar_t *title, const wchar_t *filter, const wchar_t *defExt) {
-    wchar_t path[MAX_PATH] = {};
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize  = sizeof(ofn);
-    ofn.hwndOwner    = g_hWnd;
-    ofn.lpstrTitle   = title;
-    ofn.lpstrFilter  = filter;
-    ofn.lpstrDefExt  = defExt;
-    ofn.lpstrFile    = path;
-    ofn.nMaxFile     = MAX_PATH;
-    ofn.Flags        = OFN_OVERWRITEPROMPT;
-
-    if (GetSaveFileNameW(&ofn)) return std::wstring(path);
-    return L"";
+static std::vector<std::wstring> GetDialogPaths(IFileOpenDialog *dialog) {
+    std::vector<std::wstring> paths;
+    IShellItemArray *items = nullptr;
+    if (FAILED(dialog->GetResults(&items))) return paths;
+    DWORD count = 0;
+    items->GetCount(&count);
+    for (DWORD index = 0; index < count; ++index) {
+        IShellItem *item = nullptr;
+        if (FAILED(items->GetItemAt(index, &item))) continue;
+        PWSTR rawPath = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &rawPath))) {
+            paths.emplace_back(rawPath);
+            CoTaskMemFree(rawPath);
+        }
+        item->Release();
+    }
+    items->Release();
+    return paths;
 }
 
-static std::wstring BrowseForOpenFile(const wchar_t *title, const wchar_t *filter) {
-    wchar_t path[MAX_PATH] = {};
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize  = sizeof(ofn);
-    ofn.hwndOwner    = g_hWnd;
-    ofn.lpstrTitle   = title;
-    ofn.lpstrFilter  = filter;
-    ofn.lpstrFile    = path;
-    ofn.nMaxFile     = MAX_PATH;
-    ofn.Flags        = OFN_FILEMUSTEXIST;
+static std::vector<std::wstring> BrowseForFolders(const wchar_t *title) {
+    IFileOpenDialog *dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dialog)))) return {};
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT |
+                       FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dialog->SetTitle(title);
+    std::vector<std::wstring> result;
+    if (SUCCEEDED(dialog->Show(g_hWnd))) result = GetDialogPaths(dialog);
+    dialog->Release();
+    return result;
+}
 
-    if (GetOpenFileNameW(&ofn)) return std::wstring(path);
-    return L"";
+static std::vector<std::wstring> BrowseForOpenFiles(const wchar_t *title, bool archiveOnly,
+                                                     bool allowMultiple) {
+    IFileOpenDialog *dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dialog)))) return {};
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    DWORD selectionOptions = FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST;
+    if (allowMultiple) selectionOptions |= FOS_ALLOWMULTISELECT;
+    dialog->SetOptions(options | selectionOptions);
+    dialog->SetTitle(title);
+    const COMDLG_FILTERSPEC archiveFilters[] = {
+        {L"ABK 备份文件 (*.abk)", L"*.abk"}, {L"所有文件 (*.*)", L"*.*"}};
+    if (archiveOnly) dialog->SetFileTypes(2, archiveFilters);
+    std::vector<std::wstring> result;
+    if (SUCCEEDED(dialog->Show(g_hWnd))) result = GetDialogPaths(dialog);
+    dialog->Release();
+    return result;
+}
+
+static std::wstring BrowseForOpenFile(const wchar_t *title, bool archiveOnly) {
+    auto paths = BrowseForOpenFiles(title, archiveOnly, false);
+    return paths.empty() ? L"" : paths.front();
+}
+
+static std::wstring BrowseForFolder(const wchar_t *title) {
+    auto paths = BrowseForFolders(title);
+    return paths.empty() ? L"" : paths.front();
+}
+
+static void AddBackupSources(const std::vector<std::wstring> &paths) {
+    for (const auto &path : paths) {
+        if (std::find(g_backupSources.begin(), g_backupSources.end(), path) == g_backupSources.end()) {
+            g_backupSources.push_back(path);
+            LogInfo(L"已添加备份来源: " + path);
+        }
+    }
+    RefreshBackupSources();
+}
+
+static std::wstring BrowseForSaveFile(const wchar_t *title) {
+    IFileSaveDialog *dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dialog)))) return L"";
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST);
+    dialog->SetTitle(title);
+    const COMDLG_FILTERSPEC filters[] = {
+        {L"ABK 备份文件 (*.abk)", L"*.abk"}, {L"所有文件 (*.*)", L"*.*"}};
+    dialog->SetFileTypes(2, filters);
+    dialog->SetDefaultExtension(L"abk");
+    std::wstring result;
+    if (SUCCEEDED(dialog->Show(g_hWnd))) result = GetDialogPath(dialog);
+    dialog->Release();
+    return result;
 }
 
 // ═══════════════════ 打包 / 解包操作 ═══════════════════
 
 struct PackThreadContext {
-    std::string src;
+    std::vector<std::string> sources;
     std::string dst;
     PackOptions options;
 };
@@ -282,7 +330,7 @@ struct UnpackThreadContext {
 static DWORD WINAPI PackThreadProc(LPVOID raw) {
     PackThreadContext *context = static_cast<PackThreadContext *>(raw);
     std::string error;
-    bool ok = Packer::pack(context->src, context->dst, context->options, error);
+    bool ok = Packer::pack(context->sources, context->dst, context->options, error);
     PostMessage(g_hWnd, WM_USER + 1, ok ? 1 : 0,
                 ok ? 0 : reinterpret_cast<LPARAM>(new std::string(error)));
     delete context;
@@ -300,18 +348,23 @@ static DWORD WINAPI UnpackThreadProc(LPVOID raw) {
 }
 
 static void DoPack() {
-    std::string src = WtoU(GetEditText(g_hBackupSrc));
+    std::vector<std::string> sources;
+    for (const auto &source : g_backupSources) sources.push_back(WtoU(source));
     std::string dst = WtoU(GetEditText(g_hBackupDst));
     PackOptions options;
     options.password = WtoU(GetEditText(g_hBackupPassword));
-    ParseFilterSpec(GetEditText(g_hBackupFilter), options.filter);
+    std::string filterError;
+    if (!ParseFilterOptions(WtoU(GetEditText(g_hBackupFilter)), options.filter, filterError)) {
+        LogError(L"筛选条件无效: " + UtoW(filterError));
+        return;
+    }
 
     EnableWindow(g_hBtnPack, FALSE);
     SetWindowTextW(g_hBtnPack, L"打包中…");
     LogInfo(L"正在打包…");
 
     // 在后台线程执行打包，避免阻塞 UI
-    PackThreadContext *context = new PackThreadContext{src, dst, options};
+    PackThreadContext *context = new PackThreadContext{sources, dst, options};
     HANDLE thread = CreateThread(nullptr, 0, PackThreadProc, context, 0, nullptr);
     if (thread == nullptr) {
         delete context;
@@ -367,16 +420,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         TabCtrl_InsertItem(g_hTab, 1, &tie);
 
         // ═══ 打包面板 ═══
-        int ly1 = 95, ly2 = 135, ly3 = 250;
+        int ly1 = 90, ly2 = 160, ly3 = 275;
 
-        g_hBackupSrcLabel = CreateWindowW(L"STATIC", L"源目录:", WS_CHILD | WS_VISIBLE,
+        g_hBackupSrcLabel = CreateWindowW(L"STATIC", L"备份来源:", WS_CHILD | WS_VISIBLE,
             20, ly1 + 3, 60, 20, hWnd, nullptr, g_hInst, nullptr);
-        g_hBackupSrc = CreateWindowW(L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_READONLY | WS_BORDER,
-            85, ly1, 440, 26, hWnd, (HMENU)ID_BACKUP_SRC, g_hInst, nullptr);
-        g_hBackupSrcBtn = CreateWindowW(L"BUTTON", L"选择目录",
+        g_hBackupSrc = CreateWindowW(L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
+            85, ly1, 450, 58, hWnd, (HMENU)ID_BACKUP_SRC, g_hInst, nullptr);
+        g_hBackupSrcBtn = CreateWindowW(L"BUTTON", L"添加来源...",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            535, ly1, 120, 26, hWnd, (HMENU)ID_BACKUP_SRC_BTN, g_hInst, nullptr);
+            545, ly1, 110, 26, hWnd, (HMENU)ID_BACKUP_SRC_BTN, g_hInst, nullptr);
+        g_hBackupRemoveBtn = CreateWindowW(L"BUTTON", L"移除所选",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            545, ly1 + 32, 110, 26, hWnd, (HMENU)ID_BACKUP_REMOVE_BTN, g_hInst, nullptr);
 
         g_hBackupDstLabel = CreateWindowW(L"STATIC", L"备份路径:", WS_CHILD | WS_VISIBLE,
             20, ly2 + 3, 60, 20, hWnd, nullptr, g_hInst, nullptr);
@@ -388,16 +444,16 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             535, ly2, 120, 26, hWnd, (HMENU)ID_BACKUP_DST_BTN, g_hInst, nullptr);
 
         g_hBackupPasswordLabel = CreateWindowW(L"STATIC", L"密码(可选):", WS_CHILD | WS_VISIBLE,
-            20, 175 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
+            20, 200 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
         g_hBackupPassword = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_PASSWORD | WS_BORDER,
-            95, 175, 560, 26, hWnd, (HMENU)ID_BACKUP_PASSWORD, g_hInst, nullptr);
+            95, 200, 560, 26, hWnd, (HMENU)ID_BACKUP_PASSWORD, g_hInst, nullptr);
 
         g_hBackupFilterLabel = CreateWindowW(L"STATIC", L"筛选(可选):", WS_CHILD | WS_VISIBLE,
-            20, 215 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
+            20, 240 + 3, 70, 20, hWnd, nullptr, g_hInst, nullptr);
         g_hBackupFilter = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER,
-            95, 215, 560, 26, hWnd, (HMENU)ID_BACKUP_FILTER, g_hInst, nullptr);
+            95, 240, 560, 26, hWnd, (HMENU)ID_BACKUP_FILTER, g_hInst, nullptr);
 
         g_hBtnPack = CreateWindowW(L"BUTTON", L"开始备份",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -437,7 +493,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         // ═══ 日志区域 ═══
         g_hLog = CreateWindowW(L"EDIT", L"就绪，请选择操作。",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL,
-            12, 310, 660, 180, hWnd, (HMENU)ID_LOG, g_hInst, nullptr);
+            12, 335, 660, 205, hWnd, (HMENU)ID_LOG, g_hInst, nullptr);
 
         // 设置日志字体为等宽字体
         HFONT hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -464,26 +520,36 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_COMMAND: {
         int wmId = LOWORD(wParam);
         switch (wmId) {
-        // ── 打包：选择源目录 ──
+        // ── 打包：从一个按钮添加文件或文件夹 ──
         case ID_BACKUP_SRC_BTN: {
-            std::wstring dir = BrowseForFolder(L"选择要备份的文件夹");
-            if (!dir.empty()) {
-                SetEditText(g_hBackupSrc, dir);
-                LogInfo(L"已选择源目录: " + dir);
-                EnableWindow(g_hBtnPack, AreBothSet(g_hBackupSrc, g_hBackupDst));
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, 1, L"添加文件（可多选）");
+            AppendMenuW(menu, MF_STRING, 2, L"添加文件夹（可多选）");
+            RECT buttonRect = {};
+            GetWindowRect(g_hBackupSrcBtn, &buttonRect);
+            UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                         buttonRect.left, buttonRect.bottom, 0, hWnd, nullptr);
+            DestroyMenu(menu);
+            if (choice == 1) AddBackupSources(BrowseForOpenFiles(L"选择要备份的文件", false, true));
+            if (choice == 2) AddBackupSources(BrowseForFolders(L"选择要备份的文件夹"));
+            return 0;
+        }
+        case ID_BACKUP_REMOVE_BTN: {
+            LRESULT selected = SendMessageW(g_hBackupSrc, LB_GETCURSEL, 0, 0);
+            if (selected != LB_ERR && static_cast<size_t>(selected) < g_backupSources.size()) {
+                LogInfo(L"已移除备份来源: " + g_backupSources[static_cast<size_t>(selected)]);
+                g_backupSources.erase(g_backupSources.begin() + selected);
+                RefreshBackupSources();
             }
             return 0;
         }
         // ── 打包：选择保存路径 ──
         case ID_BACKUP_DST_BTN: {
-            std::wstring file = BrowseForSaveFile(
-                L"选择备份文件保存位置",
-                L"ABK 备份文件 (*.abk)\0*.abk\0所有文件 (*.*)\0*.*\0",
-                L"abk");
+            std::wstring file = BrowseForSaveFile(L"选择备份文件保存位置");
             if (!file.empty()) {
                 SetEditText(g_hBackupDst, file);
                 LogInfo(L"已选择备份路径: " + file);
-                EnableWindow(g_hBtnPack, AreBothSet(g_hBackupSrc, g_hBackupDst));
+                EnableWindow(g_hBtnPack, CanStartBackup());
             }
             return 0;
         }
@@ -494,9 +560,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         // ── 还原：选择备份文件 ──
         case ID_RESTORE_SRC_BTN: {
-            std::wstring file = BrowseForOpenFile(
-                L"选择 .abk 备份文件",
-                L"ABK 备份文件 (*.abk)\0*.abk\0所有文件 (*.*)\0*.*\0");
+            std::wstring file = BrowseForOpenFile(L"选择 .abk 备份文件", true);
             if (!file.empty()) {
                 SetEditText(g_hRestoreSrc, file);
                 LogInfo(L"已选择备份文件: " + file);
@@ -566,6 +630,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hInst = hInstance;
 
+    HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
     // 初始化通用控件（Tab、按钮等视觉样式）
     INITCOMMONCONTROLSEX icc = {};
     icc.dwSize = sizeof(icc);
@@ -585,7 +651,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     RegisterClassExW(&wc);
 
     // 创建主窗口
-    int winW = 700, winH = 550;
+    int winW = 700, winH = 610;
     g_hWnd = CreateWindowExW(
         0,
         L"BackupToolWnd",
@@ -604,5 +670,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         DispatchMessageW(&msg);
     }
 
+    if (SUCCEEDED(comResult)) CoUninitialize();
     return (int)msg.wParam;
 }
