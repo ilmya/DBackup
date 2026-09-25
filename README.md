@@ -2,7 +2,7 @@
 
 > 软件开发课程实验项目
 
-一款基于 C++ / Win32 API 的轻量级文件备份工具，支持将多个文件和文件夹组合打包为自定义 `.abk` 归档并还原。
+一款基于 C++17 / Qt 6 Widgets 的桌面备份工具，支持将多个文件和文件夹组合打包为自定义 `.abk` 归档并还原。
 
 ## 功能特性
 
@@ -11,22 +11,27 @@
 - **灵活选择来源**：通过一个“添加来源”按钮添加多个文件或文件夹
 - **递归目录处理**：支持嵌套子目录的完整打包与还原
 - **压缩备份**：使用 zlib 对每个文件压缩，只有压缩后更小才写入压缩数据
-- **密码保护**：使用 Windows CNG 的 AES-256-CBC 加密和 SHA-256 完整性校验
+- **密码保护**：新建 v3 归档默认使用 AES-256-GCM 认证加密，并保持旧 v1/v2（AES-256-CBC）读取兼容
 - **可视化筛选面板**：提供类型预设、大小单位、时间快捷选项、常用排除和扫描预览
-- **极简图形界面**：Win32 原生 GUI；MinGW Release 默认静态链接编译器运行库
+- **现代图形界面**：Qt 6 Widgets 响应式主窗口，包含概览、备份、恢复、计划、历史、存储和设置模块
 - **可靠写入**：归档和恢复文件先写临时文件，成功后原子替换
-- **单元测试覆盖**：22 个 Google Test 用例，覆盖核心打包/解包、多来源、加密、六类筛选和可靠性
+- **自动与实时备份**：持久化 Cron 任务、版本淘汰、系统托盘和 `ReadDirectoryChangesW` 监控
+- **块级增量仓库**：4 MiB 内容寻址块、SHA-256 去重、AES-256-GCM 与按版本恢复
+- **网络备份原型**：TLS、注册登录、Token、SQLite、块级秒传/续传和用户隔离
+- **单元测试覆盖**：28 个 Google Test 用例，覆盖 Sprint 1–5 可离线验证的核心行为
 
 ## 环境要求
 
 | 工具 | 版本要求 |
 |------|---------|
-| CMake | >= 3.16 |
-| C++ 编译器 | 支持 C++17（MinGW g++ 8.1+ / MSVC 2019+） |
+| CMake | >= 3.21 |
+| Qt | >= 6.5，安装 Widgets、Network、Sql、HttpServer 及匹配的编译器套件 |
+| C++ 编译器 | 支持 C++17，并与 Qt 套件 ABI 匹配（推荐 Qt 自带 MinGW 或 MSVC 2019+） |
 | 操作系统 | Windows 10/11 |
 | 网络 | 仅在本机没有 zlib 开发库时，用于自动下载固定版本 zlib |
+| 服务器 TLS | OpenSSL 3（用于部署读取 PEM 私钥所需的 Qt OpenSSL 后端） |
 
-Google Test 已包含在仓库中。CMake 会优先使用系统 zlib；找不到时默认自动下载并构建 zlib 1.3.1。
+Google Test 已包含在仓库中。CMake 会优先使用系统 zlib；找不到时默认自动下载并构建 zlib 1.3.1。Anaconda 附带的 Qt 5 不能用于本项目。
 
 ## 快速开始
 
@@ -51,7 +56,7 @@ build.bat
 .\build.bat
 ```
 
-也可以直接双击仓库根目录下的 `build.bat`。脚本第一次运行时自动配置 CMake，之后只执行增量编译。完成后生成：
+也可以直接双击仓库根目录下的 `build.bat`。脚本会查找 `qmake6`、`QT_ROOT` 或标准的 `C:\Qt\6.x\mingw_64` 安装目录并执行增量构建。完成后生成：
 
 ```text
 build\BackupTool.exe
@@ -62,6 +67,7 @@ build\BackupTool.exe
 ```bat
 build.bat test
 build.bat package
+build.bat core-test
 ```
 
 | 命令 | 作用 |
@@ -69,13 +75,14 @@ build.bat package
 | `build.bat` | 编译程序 |
 | `build.bat test` | 编译并运行全部测试 |
 | `build.bat package` | 编译并生成便携 ZIP |
+| `build.bat core-test` | 未安装 Qt 时，仅编译核心并运行测试 |
 
 ### 3. 直接使用 CMake（可选）
 
 下面的命令不依赖 PowerShell，在 CMD、PowerShell、Git Bash 等终端中均可使用：
 
 ```text
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:\Qt\6.8.3\mingw_64
 cmake --build build -j 4
 ```
 
@@ -85,7 +92,7 @@ cmake --build build -j 4
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DDBACKUP_FETCH_ZLIB=OFF
 ```
 
-如果系统没有 zlib，配置阶段会自动下载并随工程构建。当前仓库的持续验证环境为 MinGW；正式提交前仍建议在 Visual Studio 电脑上执行一次上述命令。
+如果系统没有 zlib，配置阶段会自动下载并随工程构建。Qt 安装位置不标准时，可以先执行 `set QT_ROOT=C:\Qt\6.8.3\mingw_64` 再运行 `build.bat`。
 
 ### 4. 运行
 
@@ -98,9 +105,9 @@ build\BackupTool.exe
 ### 4. 使用
 
 **打包备份：**
-1. 切换到「️ 打包备份」标签页
+1. 在左侧导航切换到「新建备份」
 2. 点击「添加来源」→ 选择“添加文件”或“添加文件夹”；可以多选或反复添加
-3. 点击「选择路径」→ 选择 `.abk` 文件保存位置
+3. 选择“便携完整归档”或“版本化增量仓库”，再选择对应文件或仓库目录
 4. 点击「开始备份」
 
 密码和筛选条件均为可选。点击“配置筛选...”可设置：
@@ -125,10 +132,20 @@ type=file;ext=.txt;path=docs;minsize=1024;maxsize=10485760;after=2025-01-01
 未知键、非法数字、非法日期或矛盾范围会在备份开始前显示错误。
 
 **还原解包：**
-1. 切换到「📂 还原解包」标签页
+1. 在左侧导航切换到「恢复数据」
 2. 点击「选择文件」→ 选择 `.abk` 备份文件
 3. 点击「选择目录」→ 选择还原目标文件夹
 4. 点击「开始还原」
+
+### 启动课程服务器
+
+服务器强制使用 TLS。准备 PEM 格式证书和 RSA 私钥后运行：
+
+```text
+build\DBackupServer.exe --data server-data --cert server.crt --key server.key
+```
+
+默认只监听 `127.0.0.1:8443`。发布服务器前请确保 `openssl.exe` 可从 `PATH` 找到；`build.bat` 会让 `windeployqt` 同时部署 Qt OpenSSL 后端和 OpenSSL 3 DLL。该服务是课程及受信网络原型，不应直接暴露到公网。
 
 ## 运行测试
 
@@ -144,7 +161,7 @@ Release 构建完成后执行：
 build.bat package
 ```
 
-输出文件为 `build/DBackup-1.0.0-win64.zip`，压缩包内的程序仍名为 `BackupTool.exe`。MinGW Release 使用静态编译器运行库，普通 Windows 10/11 电脑无需安装 MinGW 或 zlib 即可运行。
+输出文件为 `build/DBackup-1.0.0-win64.zip`，压缩包内的程序仍名为 `BackupTool.exe`。CMake 会通过 Qt 部署脚本把所需 Qt 运行库和平台插件一并放入安装包，目标电脑不需要预装 Qt。
 
 也可以生成未压缩的安装目录：
 
@@ -159,9 +176,9 @@ cmake --install build --prefix install
 - [需求分析说明书](docs/requirements.md)
 - [系统设计文档](docs/design.md)
 - [软件测试报告](docs/test-report.md)
+- [Sprint 1–5 完成度与待验证事项](docs/progress.md)
 
-当前 Sprint 1/2 支持普通文件和目录，不支持符号链接或目录联接。所有者名称会记录，
-但不会在还原时修改文件所有者或 ACL；这类操作通常需要额外系统权限。
+v3 支持记录符号链接、目录联接和 Windows 安全描述符，并默认拒绝可能逃逸恢复目录的危险链接。创建链接和恢复 ACL 仍受当前 Windows 账户权限约束。
 
 ## 代码质量检测
 
@@ -185,11 +202,19 @@ gprof BackupTool.exe gmon.out > analysis.txt
 DBackup/
 ── CMakeLists.txt          # CMake 构建配置
 ├── packer.h / packer.cpp   # 核心打包/解包引擎
-├── main.cpp                # Win32 GUI 入口
+├── main.cpp                # Qt 6 应用入口
+├── gui/                    # 主窗口、筛选对话框和统一主题
+├── core/                   # 操作上下文与公共类型
+├── repository/             # 本地内容寻址增量仓库
+├── automation/             # Cron、任务管理与目录监控
+├── network/                # 远程服务器客户端
+├── security/               # Windows Credential Manager 封装
+├── server/                 # DBackupServer HTTP/TLS/SQLite 服务端
 ├── build.bat               # CMD/PowerShell 通用的一键构建脚本
 ├── tests/
 │   ├── CMakeLists.txt
-│   ── test_packer.cpp     # 单元测试（22 个用例）
+│   ├── test_packer.cpp
+│   └── test_sprint345.cpp # Sprint 3–5 自动化测试（共注册 28 项）
 ├── docs/                   # 需求、设计和测试文档
 ├── third_party/
 │   └── googletest/         # Google Test v1.14.0
@@ -203,19 +228,18 @@ DBackup/
 ──────────────────────────────────────────┐
 │  Header (20 bytes)                       │
 │    Magic    : "ABKPKG"  (6 bytes)        │
-│    Version  : uint16  (= 1 或 2)          │
+│    Version  : uint16  (= 1、2 或 3)        │
 │    Count    : uint32  (条目数)            │
 │    Flags    : uint32  (bit 0 = 加密)      │
 │    Reserved : uint32                      │
 ├──────────────────────────────────────────┤
-│  Version 2 Entry (每个文件/目录)           │
-│    Type/Flags/Path/Owner/Time              │
+│  Version 3 Entry (文件/目录/重解析点)       │
+│    Type/Flags/Path/Owner/Time/ACL/Link     │
 │    OriginalSize + StoredSize + Data        │
 └──────────────────────────────────────────┘
 ```
 
-版本 2 的加密归档在文件头后包含随机 salt 和 IV。版本 1 归档仍可读取，旧的无选项
-`Packer::pack` 调用会继续生成版本 1 格式以保持兼容。
+新 v3 加密归档使用随机 Salt、Nonce 和 AES-256-GCM 标签。版本 1/2 归档仍可读取；旧的无选项 `Packer::pack` 调用会继续生成版本 1 格式以保持源码和格式兼容。
 
 ## 许可证
 

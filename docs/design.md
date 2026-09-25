@@ -7,14 +7,14 @@ DBackup 采用“GUI 调度 + 独立归档引擎”的结构。设计重点是�
 ## 2. 总体架构
 
 ```text
-Win32 GUI (main.cpp)
+Qt 6 Widgets GUI (main.cpp + gui/)
 ├── 路径选择与参数输入
 ├── 筛选表达式校验
 ├── 后台工作线程
 └── 日志与结果提示
           │
           ▼
-Packer API (packer.h / packer.cpp)
+Packer compatibility API + modular services
 ├── 目录扫描与元数据采集
 ├── 筛选匹配
 ├── v1/v2 序列化与解析
@@ -22,6 +22,11 @@ Packer API (packer.h / packer.cpp)
 ├── PBKDF2 + AES-256-CBC
 ├── SHA-256 完整性校验
 └── 原子写入与数据还原
+          │
+          ├── repository/：内容寻址块、加密清单、快照与淘汰
+          ├── automation/：Cron、任务持久化、实时目录监控
+          ├── network/：远程仓库客户端
+          └── server/：TLS REST、Token、SQLite 元数据
 ```
 
 ## 3. 核心数据结构
@@ -42,7 +47,7 @@ Packer API (packer.h / packer.cpp)
 
 ### 4.1 GUI 模块
 
-`main.cpp` 创建两个标签页：备份和还原。用户触发操作后，主线程构造上下文对象并创建后台线程。后台线程只调用 `Packer`，完成后通过窗口消息返回结果，避免直接跨线程修改控件。
+`main.cpp` 仅负责初始化 Qt 应用；`gui/MainWindow` 使用侧边导航和堆叠页面组织概览、备份、恢复、计划、历史、存储与设置。当前备份和恢复页面接入真实能力，其余页面以明确的规划状态预留扩展边界。用户触发耗时操作后，GUI 创建工作线程，后台线程只调用 `Packer`，完成后通过 Qt 队列调用更新界面，避免跨线程直接修改控件。
 
 筛选文本由公共函数 `ParseFilterOptions` 解析。验证失败时不创建后台线程，从而避免无效参数被静默忽略。
 
@@ -58,7 +63,7 @@ Packer API (packer.h / packer.cpp)
 
 无法打开目录、无法读取文件或发现重解析点时返回失败。这样可以防止备份表面成功、实际遗漏数据。
 
-GUI 使用 `IFileOpenDialog` 和 `IFileSaveDialog`，替代旧式 `SHBrowseForFolderW` 与固定 `MAX_PATH` 缓冲区。备份页通过一个“添加来源”按钮弹出文件或文件夹选项，两种模式均支持多选，也可以反复添加；来源列表支持移除。多个目录来源会保留各自的根目录名，同名归档路径会被拒绝，避免无提示覆盖。
+GUI 使用 Qt 6 的 `QFileDialog` 提供原生文件选择体验。备份页通过一个“添加来源”按钮弹出文件或文件夹选项，文件模式支持多选，也可以反复添加；来源列表支持批量移除。多个目录来源会保留各自的根目录名，同名归档路径会被拒绝，避免无提示覆盖。
 
 ### 4.3 筛选模块
 
@@ -75,7 +80,7 @@ Magic[6] | Version[2] | Count[4] | Reserved[8]
 Entry = Type | Path | Attributes | Mtime | DataSize | Data
 ```
 
-### 4.5 v2 格式
+### 4.5 v2/v3 格式
 
 v2 头部：
 
@@ -92,7 +97,7 @@ OwnerLength[4] | Owner
 OriginalSize[8] | StoredSize[8] | Payload
 ```
 
-正文末尾追加 32 字节 SHA-256。若归档加密，则头部后依次保存 16 字节 Salt、16 字节 IV 和 AES-CBC 密文。
+正文末尾追加 32 字节 SHA-256。v2 加密归档继续使用 16 字节 Salt、16 字节 IV 和 AES-CBC；新写入的 v3 使用 16 字节 Salt、12 字节 Nonce、16 字节认证标签和 AES-256-GCM 密文。v3 条目还增加链接目标和自相对安全描述符。
 
 所有整数以小端序写入。解析器对版本、标志、条目数量、长度、数据大小和正文剩余长度进行检查。
 
@@ -162,16 +167,16 @@ OriginalSize[8] | StoredSize[8] | Payload
 ## 10. 已知限制与演进方向
 
 1. 文件和归档正文仍整体加载到内存，不适合超大文件。
-2. 所有者仅记录，不恢复；ACL 未实现。
+2. v3 在 Windows 上保存并恢复 owner、group 和 DACL；符号链接所指对象的 ACL 不经链接间接修改。没有相应权限时恢复会明确失败或给出错误。
 3. GUI 已采用结构化筛选控件；后续可继续增加可排序的自定义规则列表和原生日历控件。
 4. 解包不是整个目录级事务，单个文件是原子写入，但多文件中途失败仍可能产生部分结果。
-5. 尚无进度、取消、定时、实时、网络和增量功能。
+5. Qt 6.8.3 GUI 与服务器已完成 Release 构建和 localhost TLS 联调；跨机器发布、真实证书链及长期后台运行仍需独立验收。
 
 ## 11. 构建与发布设计
 
 - CMake 优先通过 `find_package(ZLIB)` 使用系统 zlib。
 - 找不到 zlib 时，默认通过 `FetchContent` 下载固定版本 zlib 1.3.1；可用 `DBACKUP_FETCH_ZLIB=OFF` 禁止联网回退。
 - Google Test 源码随仓库提供，不需要构建机再次下载。
-- MinGW Release 对 GCC、libstdc++ 和 winpthread 使用静态链接，发布程序只依赖 Windows 系统 DLL。
+- 发布由 `windeployqt` 携带 Qt、MinGW、SQLite 插件及 TLS 后端；服务器使用 PEM 私钥时还需 OpenSSL 3 运行库。
 - `cmake --build build --target package` 使用 CPack 生成 ZIP；压缩包项目名为 DBackup，可执行文件名保持 `BackupTool.exe`。
 - CMake 明确限制平台为 Windows；支持 MinGW，并为 MSVC/zlib CMake 目标保留兼容路径。

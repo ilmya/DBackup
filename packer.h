@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "core/operation.h"
 
 enum class EntryTypeFilter : uint8_t {
     Any = 0,
@@ -55,6 +56,8 @@ struct ArchiveEntry {
     uint32_t    mode = 0;       // Windows file attributes (v2); legacy v1 may be 0
     int64_t     mtimeMs = 0;    // modification time in milliseconds
     std::string owner;          // UTF-8 owner name, if available
+    std::string linkTarget;     // v3: relative symbolic-link/junction target
+    std::vector<uint8_t> securityDescriptor;  // v3: self-relative owner/group/DACL
     uint64_t    originalSize = 0;
     std::string data;           // decoded file data; empty for directories
 };
@@ -74,6 +77,8 @@ class Packer {
     /** Pack multiple files and/or directories into one v2 archive. */
     static bool pack(const std::vector<std::string> &sourcePaths, const std::string &destFile,
                      const PackOptions &options, std::string &error);
+    static bool pack(const std::vector<std::string> &sourcePaths, const std::string &destFile,
+                     const PackOptions &options, std::string &error, const OperationContext &context);
 
     /** Scan metadata only and summarize the effect of the current filters. */
     static bool preview(const std::vector<std::string> &sourcePaths, const FilterOptions &filter,
@@ -89,6 +94,8 @@ class Packer {
     static bool unpack(const std::string &archiveFile, const std::string &destDir, std::string &error);
     static bool unpack(const std::string &archiveFile, const std::string &destDir,
                        std::string &error, const std::string &password);
+    static bool unpack(const std::string &archiveFile, const std::string &destDir,
+                       std::string &error, const std::string &password, const OperationContext &context);
 };
 
 #endif  // PACKER_H_

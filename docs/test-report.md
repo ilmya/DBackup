@@ -54,10 +54,16 @@ ctest --test-dir build --output-on-failure
 | T20 | MultipleBackupSources | 多个文件和文件夹组合打包与还原 |
 | T21 | FilterAcrossAllSixCategories | 路径、类型、名称、时间、尺寸和用户组合筛选 |
 | T22 | PreviewWithMultiExtensionAndWildcardRules | 多扩展名、通配符排除和扫描预览一致性 |
+| T23 | CronExpressionTest | Cron 列表、范围、步长、非法输入和下次运行时间 |
+| T24 | IncrementalDeduplication | 加密块仓库去重、恢复、错误密码和淘汰 |
+| T25 | IncrementalSingleFileAndCancellation | 单文件边界和增量操作取消 |
+| T26 | DirectoryWatcherTest | Windows 递归目录变化通知 |
+| T27 | ArchiveV3AuthenticatedEncryption | v3 AES-GCM、篡改检测和归档取消 |
+| T28 | ArchiveV3SymbolicLinkAndAcl | 安全相对链接和安全描述符（需要系统权限） |
 
 ## 5. 测试结果
 
-最新回归结果：22 项测试全部通过，0 项失败。
+最新回归结果：28 项测试已注册，本机 27 项通过、1 项因 Windows 未授予符号链接创建权限而跳过，0 项失败。
 
 本次完善前共有 12 项测试；新增 10 项测试覆盖：
 
@@ -102,16 +108,16 @@ ctest --test-dir build --output-on-failure
 ## 8. 已知风险
 
 - 大文件和大量文件会占用较多内存。
-- AES-CBC 尚未升级为 AES-GCM。
-- 所有者和 ACL 不会恢复。
+- 新 v3 已使用 AES-GCM；AES-CBC 只保留旧 v2 读取兼容。
+- ACL 恢复依赖当前账户权限，符号链接测试在未授予创建链接权限的环境会跳过。
 - 整个还原任务不是目录级事务，中途失败可能留下已完成文件。
-- GUI 暂无备份进度和取消操作；筛选面板尚未提供可排序的任意规则列表。
+- GUI 已提供备份进度和取消操作；筛选面板尚未提供可排序的任意规则列表。
 - 尚未生成代码覆盖率和正式性能数据。
 
 ## 9. 测试结论
 
-当前版本通过 Sprint 1、Sprint 2 的 22 项自动化回归测试，核心备份还原、多来源选择、压缩加密、可视化筛选配置和基础可靠性达到课程阶段演示要求。正式提交前仍应完成跨机器发布验证和人工 GUI 验收，并将结果截图附入最终 PDF 测试报告。
+当前版本的 Sprint 1–5 核心回归测试为 27 项通过、1 项权限相关跳过，覆盖归档兼容、GCM、增量仓库、Cron 和目录变更通知。Qt 6.8.3 客户端与服务器均已完成 Release 构建；GUI 启动冒烟和 localhost TLS API 联调通过。跨机器发布验证及长期后台运行仍需人工验收。
 
 ## 10. 可移植构建验证
 
-项目支持在独立构建目录中完成 Release 配置、编译、22 项测试和 CPack ZIP 打包。MinGW 发布构建采用静态编译器运行库；应在每次正式发布时使用 `objdump -p BackupTool.exe` 或等效工具确认只剩 Windows 系统 DLL，并在未安装开发工具的 Windows 电脑上执行最终冒烟测试。
+项目已在独立构建目录中完成 Release 配置、编译、28 项测试和 CPack ZIP 打包。Qt 6 发布包携带 Widgets、HttpServer、SQLite、平台插件、OpenSSL TLS 后端及所需运行库，并已在全新解压目录完成 GUI 和 HTTPS 服务器冒烟；仍应在未安装 Qt 和开发工具的另一台 Windows 电脑上执行最终验收。

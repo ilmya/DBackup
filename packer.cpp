@@ -12,6 +12,7 @@
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <zlib.h>
+#include <winioctl.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -33,6 +34,7 @@ namespace {
 const char kMagic[6] = {'A', 'B', 'K', 'P', 'K', 'G'};
 const uint16_t kVersion1 = 1;
 const uint16_t kVersion2 = 2;
+const uint16_t kVersion3 = 3;
 const uint32_t kEncrypted = 1u;
 const uint8_t kCompressed = 1u;
 
@@ -236,6 +238,7 @@ struct DirItem {
     int64_t mtimeMs = 0;
     std::string owner;
     uint32_t attributes = 0;
+    bool isReparse = false;
 };
 
 bool ListDirectory(const std::string &dir, std::vector<DirItem> &items, std::string &error) {
@@ -257,11 +260,7 @@ bool ListDirectory(const std::string &dir, std::vector<DirItem> &items, std::str
         item.mtimeMs = FileTimeToMs(fd.ftLastWriteTime);
         item.owner = OwnerName(UtoW(dir + "\\" + item.name));
         item.attributes = fd.dwFileAttributes;
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            FindClose(handle);
-            error = "暂不支持符号链接或重解析点: " + dir + "\\" + item.name;
-            return false;
-        }
+        item.isReparse = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
         items.push_back(std::move(item));
     } while (FindNextFileW(handle, &fd));
     DWORD findError = GetLastError();
@@ -292,6 +291,42 @@ std::string Lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
+}
+
+std::vector<uint8_t> SecurityDescriptor(const std::wstring &path) {
+    DWORD size = 0;
+    GetFileSecurityW(path.c_str(), OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                     DACL_SECURITY_INFORMATION, nullptr, 0, &size);
+    std::vector<uint8_t> descriptor(size);
+    if (size != 0 && !GetFileSecurityW(path.c_str(), OWNER_SECURITY_INFORMATION |
+        GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        reinterpret_cast<PSECURITY_DESCRIPTOR>(descriptor.data()), size, &size)) descriptor.clear();
+    return descriptor;
+}
+
+struct PackerReparseBuffer {
+    DWORD tag; USHORT dataLength; USHORT reserved;
+    union {
+        struct { USHORT substituteOffset, substituteLength, printOffset, printLength; ULONG flags; WCHAR path[1]; } symlink;
+        struct { USHORT substituteOffset, substituteLength, printOffset, printLength; WCHAR path[1]; } mount;
+        struct { UCHAR data[1]; } generic;
+    } value;
+};
+
+std::string ReparseTarget(const std::wstring &path) {
+    HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return {};
+    std::vector<uint8_t> data(MAXIMUM_REPARSE_DATA_BUFFER_SIZE); DWORD got = 0;
+    bool ok = DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, nullptr, 0, data.data(),
+                              static_cast<DWORD>(data.size()), &got, nullptr) != 0;
+    CloseHandle(handle); if (!ok) return {};
+    auto *buffer = reinterpret_cast<PackerReparseBuffer *>(data.data());
+    const WCHAR *text = nullptr; USHORT offset = 0, length = 0;
+    if (buffer->tag == IO_REPARSE_TAG_SYMLINK) { text=buffer->value.symlink.path; offset=buffer->value.symlink.printOffset; length=buffer->value.symlink.printLength; }
+    else if (buffer->tag == IO_REPARSE_TAG_MOUNT_POINT) { text=buffer->value.mount.path; offset=buffer->value.mount.printOffset; length=buffer->value.mount.printLength; }
+    else return {};
+    return WtoU(std::wstring(reinterpret_cast<const WCHAR *>(reinterpret_cast<const uint8_t *>(text)+offset), length/sizeof(WCHAR)));
 }
 
 bool WildcardMatch(const std::string &patternValue, const std::string &textValue) {
@@ -372,16 +407,18 @@ bool CollectEntries(const std::string &dir, const std::string &base, const Filte
         const std::string relative = JoinPath(base, item.name);
         if (Matches(item, relative, filter)) {
             ArchiveEntry entry;
-            entry.type = item.isDir ? 1 : 0;
+            entry.type = item.isReparse ? 2 : (item.isDir ? 1 : 0);
             entry.relativePath = relative;
             entry.mtimeMs = item.mtimeMs;
             entry.owner = item.owner;
+            entry.securityDescriptor = SecurityDescriptor(UtoW(sourcePath));
+            if (item.isReparse) entry.linkTarget = ReparseTarget(UtoW(sourcePath));
             entry.mode = item.attributes;
             entry.originalSize = item.isDir ? 0 : item.size;
-            if (!item.isDir && !ReadWholeFile(sourcePath, entry.data, error)) return false;
+            if (!item.isDir && !item.isReparse && !ReadWholeFile(sourcePath, entry.data, error)) return false;
             entries.push_back(std::move(entry));
         }
-        if (item.isDir && !CollectEntries(sourcePath, relative, filter, excludedPath, entries, error)) return false;
+        if (item.isDir && !item.isReparse && !CollectEntries(sourcePath, relative, filter, excludedPath, entries, error)) return false;
     }
     return true;
 }
@@ -400,8 +437,9 @@ bool CollectSource(const std::string &sourcePath, const std::string &destFile,
         return false;
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        error = "暂不支持符号链接或重解析点: " + sourcePath;
-        return false;
+        ArchiveEntry entry; entry.type=2; entry.relativePath=WtoU(sourceWide.substr(sourceWide.find_last_of(L"\\/")+1));
+        entry.mode=attributes; entry.owner=OwnerName(sourceWide); entry.securityDescriptor=SecurityDescriptor(sourceWide);
+        entry.linkTarget=ReparseTarget(sourceWide); entries.push_back(std::move(entry)); return true;
     }
     if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
         size_t slash = sourceWide.find_last_of(L"\\/");
@@ -431,6 +469,7 @@ bool CollectSource(const std::string &sourcePath, const std::string &destFile,
     entry.mode = item.attributes;
     entry.mtimeMs = item.mtimeMs;
     entry.owner = item.owner;
+    entry.securityDescriptor = SecurityDescriptor(sourceWide);
     entry.originalSize = item.size;
     if (!ReadWholeFile(sourcePath, entry.data, error)) return false;
     entries.push_back(std::move(entry));
@@ -646,6 +685,54 @@ bool AesCrypt(const std::vector<uint8_t> &input, const std::vector<uint8_t> &key
     return status == 0;
 }
 
+bool AesGcm(const std::vector<uint8_t> &input, const std::vector<uint8_t> &key,
+            const std::vector<uint8_t> &nonce, std::vector<uint8_t> &tag,
+            bool encrypt, std::vector<uint8_t> &output) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_KEY_HANDLE keyHandle = nullptr;
+    DWORD objectSize = 0, resultSize = 0, required = 0, actual = 0;
+    if (key.size() != 32 || nonce.size() != 12 ||
+        BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_AES_ALGORITHM, nullptr, 0) < 0 ||
+        BCryptSetProperty(algorithm, BCRYPT_CHAINING_MODE,
+            reinterpret_cast<PUCHAR>(const_cast<wchar_t *>(BCRYPT_CHAIN_MODE_GCM)),
+            sizeof(BCRYPT_CHAIN_MODE_GCM), 0) < 0 ||
+        BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectSize),
+                          sizeof(objectSize), &resultSize, 0) < 0) {
+        if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+        return false;
+    }
+    std::vector<uint8_t> object(objectSize);
+    if (BCryptGenerateSymmetricKey(algorithm, &keyHandle, object.data(), objectSize,
+        const_cast<PUCHAR>(key.data()), static_cast<ULONG>(key.size()), 0) < 0) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return false;
+    }
+    if (encrypt) tag.assign(16, 0);
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth;
+    BCRYPT_INIT_AUTH_MODE_INFO(auth);
+    auth.pbNonce = const_cast<PUCHAR>(nonce.data());
+    auth.cbNonce = static_cast<ULONG>(nonce.size());
+    auth.pbTag = tag.data();
+    auth.cbTag = static_cast<ULONG>(tag.size());
+    NTSTATUS status = encrypt
+        ? BCryptEncrypt(keyHandle, const_cast<PUCHAR>(input.data()), static_cast<ULONG>(input.size()),
+                        &auth, nullptr, 0, nullptr, 0, &required, 0)
+        : BCryptDecrypt(keyHandle, const_cast<PUCHAR>(input.data()), static_cast<ULONG>(input.size()),
+                        &auth, nullptr, 0, nullptr, 0, &required, 0);
+    if (status >= 0) {
+        output.resize(required);
+        status = encrypt
+            ? BCryptEncrypt(keyHandle, const_cast<PUCHAR>(input.data()), static_cast<ULONG>(input.size()),
+                            &auth, nullptr, 0, output.data(), required, &actual, 0)
+            : BCryptDecrypt(keyHandle, const_cast<PUCHAR>(input.data()), static_cast<ULONG>(input.size()),
+                            &auth, nullptr, 0, output.data(), required, &actual, 0);
+        output.resize(status >= 0 ? actual : 0);
+    }
+    BCryptDestroyKey(keyHandle);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return status >= 0;
+}
+
 bool SerializeEntries(const std::vector<ArchiveEntry> &entries, int compressionLevel,
                       std::vector<uint8_t> &body, std::string &error) {
     body.clear();
@@ -676,6 +763,10 @@ bool SerializeEntries(const std::vector<ArchiveEntry> &entries, int compressionL
         AppendI64(body, entry.mtimeMs);
         AppendU32(body, static_cast<uint32_t>(entry.owner.size()));
         body.insert(body.end(), entry.owner.begin(), entry.owner.end());
+        AppendU32(body, static_cast<uint32_t>(entry.linkTarget.size()));
+        body.insert(body.end(), entry.linkTarget.begin(), entry.linkTarget.end());
+        AppendU32(body, static_cast<uint32_t>(entry.securityDescriptor.size()));
+        body.insert(body.end(), entry.securityDescriptor.begin(), entry.securityDescriptor.end());
         AppendU64(body, entry.type == 0 ? entry.data.size() : 0);
         AppendU64(body, entry.type == 0 ? payload.size() : 0);
         body.insert(body.end(), payload.begin(), payload.end());
@@ -776,6 +867,25 @@ bool ReadFileBytes(const std::string &path, std::vector<uint8_t> &bytes) {
     if (!file) return false;
     bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     return !file.bad();
+}
+
+bool ParseV3Entries(const std::vector<uint8_t> &body, uint32_t count,
+                    std::vector<ArchiveEntry> &entries, std::string &error) {
+    if (body.size() < 32) { error="归档数据不完整"; return false; }
+    std::vector<uint8_t> expected, content(body.begin(),body.end()-32);
+    if(!Sha256(content,expected)||!std::equal(expected.begin(),expected.end(),body.end()-32)){error="归档校验失败（密码错误或文件已损坏）";return false;}
+    size_t pos=0;entries.clear();
+    for(uint32_t i=0;i<count;++i){ArchiveEntry entry;uint32_t pathSize=0,ownerSize=0,linkSize=0,securitySize=0;uint64_t storedSize=0;
+        if(!TakeU8(body,pos,entry.type)||!TakeU8(body,pos,entry.flags)||!TakeU32(body,pos,pathSize)||pathSize>body.size()-pos){error="归档条目头部不完整";return false;}
+        if(entry.type>2||(entry.flags&~kCompressed)!=0){error="归档条目类型或标志非法";return false;}entry.relativePath.assign(reinterpret_cast<const char*>(body.data()+pos),pathSize);pos+=pathSize;
+        if(!TakeU32(body,pos,entry.mode)||!TakeI64(body,pos,entry.mtimeMs)||!TakeU32(body,pos,ownerSize)||ownerSize>body.size()-pos){error="归档条目元数据不完整";return false;}entry.owner.assign(reinterpret_cast<const char*>(body.data()+pos),ownerSize);pos+=ownerSize;
+        if(!TakeU32(body,pos,linkSize)||linkSize>body.size()-pos){error="链接元数据不完整";return false;}entry.linkTarget.assign(reinterpret_cast<const char*>(body.data()+pos),linkSize);pos+=linkSize;
+        if(!TakeU32(body,pos,securitySize)||securitySize>body.size()-pos){error="安全描述符不完整";return false;}entry.securityDescriptor.assign(body.begin()+pos,body.begin()+pos+securitySize);pos+=securitySize;
+        if(!TakeU64(body,pos,entry.originalSize)||!TakeU64(body,pos,storedSize)||storedSize>body.size()-pos){error="归档条目数据长度非法";return false;}std::string payload(reinterpret_cast<const char*>(body.data()+pos),static_cast<size_t>(storedSize));pos+=storedSize;
+        if(entry.type!=0){if(storedSize||entry.originalSize){error="非文件条目包含数据";return false;}}
+        else if(entry.flags&kCompressed){if(!Decompress(payload,entry.originalSize,entry.data)){error="文件解压失败: "+entry.relativePath;return false;}}
+        else{if(entry.originalSize!=storedSize){error="文件大小校验失败";return false;}entry.data=std::move(payload);}entries.push_back(std::move(entry));}
+    if(pos!=body.size()-32){error="归档包含多余或截断数据";return false;}return true;
 }
 
 bool WriteArchiveAtomic(const std::string &destFile,
@@ -960,6 +1070,13 @@ bool Packer::pack(const std::string &sourcePath, const std::string &destFile,
 
 bool Packer::pack(const std::vector<std::string> &sourcePaths, const std::string &destFile,
                   const PackOptions &options, std::string &error) {
+    return pack(sourcePaths, destFile, options, error, OperationContext{});
+}
+
+bool Packer::pack(const std::vector<std::string> &sourcePaths, const std::string &destFile,
+                  const PackOptions &options, std::string &error, const OperationContext &context) {
+    if (context.isCancelled()) { error = "操作已取消"; return false; }
+    OperationProgress progress; progress.stage = OperationStage::Scanning; context.report(progress);
     std::vector<ArchiveEntry> entries;
     if (!CollectSources(sourcePaths, destFile, options.filter, entries, error)) return false;
     if (entries.size() > std::numeric_limits<uint32_t>::max()) {
@@ -969,10 +1086,12 @@ bool Packer::pack(const std::vector<std::string> &sourcePaths, const std::string
     std::vector<uint8_t> body;
     if (!SerializeEntries(entries, options.compressionLevel, body, error)) return false;
     uint32_t flags = options.password.empty() ? 0 : kEncrypted;
-    std::vector<uint8_t> salt(16), iv(16), key, storedBody;
+    progress.stage = OperationStage::Compressing; progress.totalFiles = entries.size(); context.report(progress);
+    std::vector<uint8_t> salt(16), nonce(12), tag, key, storedBody;
     if (flags != 0) {
-        if (!RandomBytes(salt) || !RandomBytes(iv) || !DeriveKey(options.password, salt, key) ||
-            !AesCrypt(body, key, iv, true, storedBody)) {
+        progress.stage = OperationStage::Encrypting; context.report(progress);
+        if (!RandomBytes(salt) || !RandomBytes(nonce) || !DeriveKey(options.password, salt, key) ||
+            !AesGcm(body, key, nonce, tag, true, storedBody)) {
             error = "无法加密归档数据";
             return false;
         }
@@ -981,11 +1100,12 @@ bool Packer::pack(const std::vector<std::string> &sourcePaths, const std::string
     }
     return WriteArchiveAtomic(destFile, [&](std::ofstream &out) {
         out.write(kMagic, sizeof(kMagic));
-        if (!WriteU16(out, kVersion2) || !WriteU32(out, static_cast<uint32_t>(entries.size())) ||
+        if (!WriteU16(out, kVersion3) || !WriteU32(out, static_cast<uint32_t>(entries.size())) ||
             !WriteU32(out, flags) || !WriteU32(out, 0)) return false;
         if (flags != 0) {
             out.write(reinterpret_cast<const char *>(salt.data()), static_cast<std::streamsize>(salt.size()));
-            out.write(reinterpret_cast<const char *>(iv.data()), static_cast<std::streamsize>(iv.size()));
+            out.write(reinterpret_cast<const char *>(nonce.data()), static_cast<std::streamsize>(nonce.size()));
+            out.write(reinterpret_cast<const char *>(tag.data()), static_cast<std::streamsize>(tag.size()));
         }
         out.write(reinterpret_cast<const char *>(storedBody.data()), static_cast<std::streamsize>(storedBody.size()));
         return static_cast<bool>(out);
@@ -1062,7 +1182,7 @@ bool Packer::readArchive(const std::string &archiveFile, std::vector<ArchiveEntr
         if (pos != file.size()) { error = "归档包含多余数据"; return false; }
         return true;
     }
-    if (version != kVersion2 || file.size() < pos + 8) {
+    if ((version != kVersion2 && version != kVersion3) || file.size() < pos + 8) {
         error = "不支持的 .abk 版本";
         return false;
     }
@@ -1074,20 +1194,31 @@ bool Packer::readArchive(const std::string &archiveFile, std::vector<ArchiveEntr
     }
     std::vector<uint8_t> body(file.begin() + static_cast<std::ptrdiff_t>(pos), file.end());
     if (flags & kEncrypted) {
-        if (password.empty() || body.size() < 32) {
+        const size_t cryptoHeader = version == kVersion3 ? 44 : 32;
+        if (password.empty() || body.size() < cryptoHeader) {
             error = "该备份文件需要密码";
             return false;
         }
         std::vector<uint8_t> salt(body.begin(), body.begin() + 16);
-        std::vector<uint8_t> iv(body.begin() + 16, body.begin() + 32);
-        std::vector<uint8_t> encrypted(body.begin() + 32, body.end());
         std::vector<uint8_t> key;
-        if (!DeriveKey(password, salt, key) || !AesCrypt(encrypted, key, iv, false, body)) {
+        bool decrypted = false;
+        if (version == kVersion3) {
+            std::vector<uint8_t> nonce(body.begin() + 16, body.begin() + 28);
+            std::vector<uint8_t> tag(body.begin() + 28, body.begin() + 44);
+            std::vector<uint8_t> encrypted(body.begin() + 44, body.end());
+            decrypted = DeriveKey(password, salt, key) && AesGcm(encrypted, key, nonce, tag, false, body);
+        } else {
+            std::vector<uint8_t> iv(body.begin() + 16, body.begin() + 32);
+            std::vector<uint8_t> encrypted(body.begin() + 32, body.end());
+            decrypted = DeriveKey(password, salt, key) && AesCrypt(encrypted, key, iv, false, body);
+        }
+        if (!decrypted) {
             error = "密码错误或归档解密失败";
             return false;
         }
     }
-    return ParseV2Entries(body, count, entries, error);
+    return version == kVersion3 ? ParseV3Entries(body, count, entries, error)
+                                : ParseV2Entries(body, count, entries, error);
 }
 
 bool Packer::unpack(const std::string &archiveFile, const std::string &destDir, std::string &error) {
@@ -1096,11 +1227,24 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir, 
 
 bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
                     std::string &error, const std::string &password) {
+    return unpack(archiveFile, destDir, error, password, OperationContext{});
+}
+
+bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
+                    std::string &error, const std::string &password,
+                    const OperationContext &context) {
+    if (context.isCancelled()) { error = "操作已取消"; return false; }
     std::vector<ArchiveEntry> entries;
     if (!readArchive(archiveFile, entries, error, password)) return false;
+    uint64_t completed = 0;
     for (const auto &entry : entries) {
+        if (context.isCancelled()) { error = "操作已取消"; return false; }
         if (!IsSafeRelativePath(entry.relativePath)) {
             error = "归档包含不安全路径: " + entry.relativePath;
+            return false;
+        }
+        if (entry.type == 2 && !IsSafeRelativePath(entry.linkTarget)) {
+            error = "归档包含不安全链接目标: " + entry.linkTarget;
             return false;
         }
     }
@@ -1114,6 +1258,17 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
         if (entry.type == 1) {
             if (!CreateDirRecursive(fullPath)) {
                 error = "无法创建目录: " + fullPath;
+                return false;
+            }
+        } else if (entry.type == 2) {
+            size_t slash = fullPath.find_last_of('\\');
+            if (slash != std::string::npos) CreateDirRecursive(fullPath.substr(0, slash));
+            DWORD flags = (entry.mode & FILE_ATTRIBUTE_DIRECTORY) ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0;
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+            flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+            if (!CreateSymbolicLinkW(UtoW(fullPath).c_str(), UtoW(entry.linkTarget).c_str(), flags)) {
+                error = "无法恢复符号链接: " + fullPath;
                 return false;
             }
         } else {
@@ -1131,7 +1286,7 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
             SetFileTime(handle, nullptr, nullptr, &ft);
             CloseHandle(handle);
         }
-        if (entry.mode != 0) {
+        if (entry.mode != 0 && entry.type != 2) {
             DWORD attributes = entry.mode & ~(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT);
             if (attributes == 0) attributes = FILE_ATTRIBUTE_NORMAL;
             if (!SetFileAttributesW(UtoW(fullPath).c_str(), attributes)) {
@@ -1139,6 +1294,17 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
                 return false;
             }
         }
+        if (!entry.securityDescriptor.empty() && entry.type != 2) {
+            SetFileSecurityW(UtoW(fullPath).c_str(), OWNER_SECURITY_INFORMATION |
+                GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                reinterpret_cast<PSECURITY_DESCRIPTOR>(
+                    const_cast<uint8_t *>(entry.securityDescriptor.data())));
+        }
+        OperationProgress progress; progress.stage = OperationStage::Restoring;
+        progress.currentPath = entry.relativePath; progress.completedFiles = ++completed;
+        progress.totalFiles = entries.size(); context.report(progress);
     }
+    OperationProgress done; done.stage = OperationStage::Completed;
+    done.completedFiles = entries.size(); done.totalFiles = entries.size(); context.report(done);
     return true;
 }

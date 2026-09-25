@@ -1,5 +1,6 @@
 # 构建产物
 build/
+build-core/
 out/
 cmake-build-*/
 tmp/
@@ -29,6 +30,7 @@ Makefile
 
 # 测试产物
 test_output/
+Testing/
 *.gcov
 *.gcda
 *.gcno

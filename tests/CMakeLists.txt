@@ -1,5 +1,6 @@
 add_executable(BackupToolTests
     test_packer.cpp
+    test_sprint345.cpp
 )
 
 target_link_libraries(BackupToolTests PRIVATE
