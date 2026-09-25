@@ -39,6 +39,7 @@
 #include "repository/repository.h"
 #include "security/credential_store.h"
 #include "network/remote_client.h"
+#include "network/remote_repository_service.h"
 
 namespace {
 QPushButton *button(const QString &text, bool primary = false) {
@@ -54,6 +55,21 @@ QString humanSize(uint64_t bytes) {
     int unit = 0;
     while (value >= 1024.0 && unit < units.size() - 1) { value /= 1024.0; ++unit; }
     return QString::number(value, 'f', unit == 0 ? 0 : 2) + " " + units[unit];
+}
+
+QString stageName(OperationStage stage) {
+    switch (stage) {
+    case OperationStage::Scanning: return QObject::tr("正在扫描");
+    case OperationStage::Reading: return QObject::tr("正在读取");
+    case OperationStage::Compressing: return QObject::tr("正在压缩");
+    case OperationStage::Encrypting: return QObject::tr("正在加密");
+    case OperationStage::Writing: return QObject::tr("正在写入");
+    case OperationStage::Uploading: return QObject::tr("正在上传");
+    case OperationStage::Downloading: return QObject::tr("正在下载");
+    case OperationStage::Restoring: return QObject::tr("正在恢复");
+    case OperationStage::Completed: return QObject::tr("已完成");
+    }
+    return {};
 }
 
 QFrame *metricCard(const QString &title, const QString &value, const QString &detail) {
@@ -85,7 +101,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     pages_->addWidget(createDashboardPage());
     pages_->addWidget(createBackupPage());
     pages_->addWidget(createRestorePage());
-    jobs_ = new JobManager(this);remote_=new RemoteClient(this);
+    jobs_ = new JobManager(this);remote_=new RemoteClient(this);remoteRepository_=new RemoteRepositoryService(remote_,this);
+    remote_->setCertificatePrompt([this](const QString &server,const QString &fingerprint){
+        return QMessageBox::question(this,tr("确认服务器证书"),
+            tr("这是首次连接 %1。\n\n证书 SHA-256 指纹：\n%2\n\n请与服务器管理员提供的指纹核对，确认无误后再信任。").arg(server,fingerprint),
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::No)==QMessageBox::Yes;
+    });
     pages_->addWidget(createSchedulePage());
     pages_->addWidget(createHistoryPage());
     pages_->addWidget(createStoragePage());
@@ -102,7 +123,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     }
     navButtons.first()->setChecked(true);
     navLayout->addStretch();
-    auto *version = new QLabel(tr("Sprint 1–2 · v1.0.0")); version->setStyleSheet("color:#64748b;padding:8px;");
+    auto *version = new QLabel(tr("DBackup 1.0")); version->setStyleSheet("color:#64748b;padding:8px;");
     navLayout->addWidget(version);
     layout->addWidget(sidebar); layout->addWidget(pages_, 1);
     setCentralWidget(root);
@@ -112,13 +133,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *logDock = new QGroupBox(tr("活动日志")); auto *logLayout = new QVBoxLayout(logDock); logLayout->addWidget(activityLog_);
     auto *dock = new QDockWidget; dock->setWidget(logDock); dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
-    progress_ = new QProgressBar; progress_->setRange(0, 1); progress_->setValue(0); progress_->setFixedWidth(180); progress_->setTextVisible(false);
+    progressDetails_ = new QLabel(tr("就绪")); progressDetails_->setMinimumWidth(260);
+    progress_ = new QProgressBar; progress_->setRange(0, 100); progress_->setValue(0); progress_->setFixedWidth(180); progress_->setTextVisible(true);
     cancelButton_=button(tr("取消"));cancelButton_->setVisible(false);connect(cancelButton_,&QPushButton::clicked,this,[this]{cancelled_=true;statusBar()->showMessage(tr("正在取消…"));});
-    statusBar()->addPermanentWidget(cancelButton_);statusBar()->addPermanentWidget(progress_); statusBar()->showMessage(tr("就绪"));
+    statusBar()->addPermanentWidget(progressDetails_,1);statusBar()->addPermanentWidget(cancelButton_);statusBar()->addPermanentWidget(progress_); statusBar()->showMessage(tr("就绪"));
     appendLog(tr("DBackup 已启动，核心备份服务就绪。"));
     auto *trayMenu=new QMenu(this);trayMenu->addAction(tr("打开 DBackup"),this,[this]{showNormal();raise();activateWindow();});trayMenu->addAction(tr("暂停自动任务"),this,[this]{jobs_->pause(true);});trayMenu->addAction(tr("继续自动任务"),this,[this]{jobs_->pause(false);});trayMenu->addSeparator();trayMenu->addAction(tr("退出"),this,[this]{quitting_=true;qApp->quit();});
     tray_=new QSystemTrayIcon(windowIcon(),this);tray_->setToolTip("DBackup");tray_->setContextMenu(trayMenu);tray_->show();connect(tray_,&QSystemTrayIcon::activated,this,[this](auto reason){if(reason==QSystemTrayIcon::Trigger){showNormal();raise();}});
-    jobs_->setExecutor([this](const BackupJob&job){QThread *worker=QThread::create([this,job]{std::string password,error;CredentialStore::load(("job/"+job.id).toStdString(),password,error);SnapshotOptions options;for(auto&s:job.sources)options.sources.push_back(s.toUtf8().toStdString());options.password=password;LocalRepository repo(job.destination.toUtf8().toStdString());SnapshotInfo info;bool ok=repo.createSnapshot(options,info,error);if(ok)repo.prune(job.retention,error);QMetaObject::invokeMethod(this,[this,job,ok,error]{jobs_->markFinished(job.id,ok,QString::fromUtf8(error.c_str()));appendLog(ok?tr("自动任务“%1”完成").arg(job.name):tr("自动任务“%1”失败：%2").arg(job.name,QString::fromUtf8(error.c_str())),!ok);},Qt::QueuedConnection);});connect(worker,&QThread::finished,worker,&QObject::deleteLater);worker->start();});
+    jobs_->setExecutor([this](const BackupJob&job){QThread *worker=QThread::create([this,job]{std::string password,error;CredentialStore::load(("job/"+job.id).toStdString(),password,error);SnapshotOptions options;for(auto&s:job.sources)options.sources.push_back(s.toUtf8().toStdString());options.password=password;options.filter=job.filter;LocalRepository repo(job.destination.toUtf8().toStdString());SnapshotInfo info;bool ok=repo.createSnapshot(options,info,error);if(ok)repo.prune(job.retention,error);QMetaObject::invokeMethod(this,[this,job,ok,error]{jobs_->markFinished(job.id,ok,QString::fromUtf8(error.c_str()));appendLog(ok?tr("自动任务“%1”完成").arg(job.name):tr("自动任务“%1”失败：%2").arg(job.name,QString::fromUtf8(error.c_str())),!ok);},Qt::QueuedConnection);});connect(worker,&QThread::finished,worker,&QObject::deleteLater);worker->start();});
     jobs_->start();
 }
 
@@ -136,16 +158,16 @@ QWidget *MainWindow::createDashboardPage() {
     QVBoxLayout *layout = nullptr; QWidget *page = createPageShell(tr("概览"), tr("从这里掌握备份状态，并快速开始常用操作。"), &layout);
     auto *metrics = new QHBoxLayout;
     metrics->addWidget(metricCard(tr("当前状态"), tr("就绪"), tr("等待创建备份任务")));
-    metrics->addWidget(metricCard(tr("归档格式"), tr("ABK v2"), tr("压缩、加密、完整性校验")));
-    metrics->addWidget(metricCard(tr("自动化测试"), tr("22 / 22"), tr("核心用例全部通过")));
+    metrics->addWidget(metricCard(tr("数据保护"), tr("AES-256-GCM"), tr("加密、认证与完整性校验")));
+    metrics->addWidget(metricCard(tr("备份方式"), tr("完整 + 增量"), tr("便携归档与可恢复历史版本")));
     layout->addLayout(metrics);
     auto *quick = new QGroupBox(tr("快速开始")); auto *quickLayout = new QHBoxLayout(quick);
     auto *backup = button(tr("创建新备份"), true); auto *restore = button(tr("恢复已有归档"));
     connect(backup, &QPushButton::clicked, this, [this] { pages_->setCurrentIndex(1); });
     connect(restore, &QPushButton::clicked, this, [this] { pages_->setCurrentIndex(2); });
     quickLayout->addWidget(backup); quickLayout->addWidget(restore); quickLayout->addStretch(); layout->addWidget(quick);
-    auto *notice = new QGroupBox(tr("下一阶段能力")); auto *noticeLayout = new QVBoxLayout(notice);
-    auto *text = new QLabel(tr("主框架已为定时任务、历史版本、远程存储、通知和插件式存储后端预留独立页面。当前未实现的功能以规划状态展示，不会产生误导性的可用按钮。"));
+    auto *notice = new QGroupBox(tr("保护建议")); auto *noticeLayout = new QVBoxLayout(notice);
+    auto *text = new QLabel(tr("为重要数据同时保留本地和远程副本，并定期从备份历史中执行恢复检查。"));
     text->setWordWrap(true); text->setProperty("muted", true); noticeLayout->addWidget(text); layout->addWidget(notice); layout->addStretch();
     return page;
 }
@@ -221,22 +243,22 @@ QWidget *MainWindow::createHistoryPage() {
 QWidget *MainWindow::createStoragePage() {
     QVBoxLayout *layout=nullptr;QWidget *page=createPageShell(tr("存储位置"),tr("管理本地增量仓库和远程 DBackup Server。"),&layout);
     auto *local=new QGroupBox(tr("本地仓库"));auto *localLayout=new QVBoxLayout(local);auto *localText=new QLabel(tr("本地仓库使用 4 MiB 内容寻址块、SHA-256 去重及 AES-256-GCM 认证加密。可在“新建备份”或“任务计划”中创建。"));localText->setWordWrap(true);localLayout->addWidget(localText);layout->addWidget(local);
-    auto *remote=new QGroupBox(tr("远程服务器（课程原型）"));auto *form=new QFormLayout(remote);
+    auto *remote=new QGroupBox(tr("远程服务器"));auto *form=new QFormLayout(remote);
     auto *endpoint=new QLineEdit("https://127.0.0.1:8443");auto *user=new QLineEdit;auto *pass=new QLineEdit;auto *status=new QLabel(tr("未连接"));
     pass->setEchoMode(QLineEdit::Password);form->addRow(tr("服务器"),endpoint);form->addRow(tr("用户名"),user);form->addRow(tr("密码"),pass);
-    auto *buttons=new QHBoxLayout;auto *registerButton=button(tr("注册"));auto *loginButton=button(tr("登录"),true);
-    buttons->addWidget(registerButton);buttons->addWidget(loginButton);buttons->addWidget(status,1);form->addRow(buttons);auto *note=new QLabel(tr("服务器采用 TLS、Token 和用户级块隔离。当前环境未执行真实服务器联调。"));note->setWordWrap(true);note->setProperty("muted",true);form->addRow(note);layout->addWidget(remote);layout->addStretch();auto configure=[this,endpoint]{remote_->configure(QUrl(endpoint->text()),"remote/"+QUrl(endpoint->text()).host());};connect(registerButton,&QPushButton::clicked,this,[=]{configure();remote_->registerUser(user->text(),pass->text(),[status](bool ok,QString error){status->setText(ok?QObject::tr("注册成功，请登录"):error);});});connect(loginButton,&QPushButton::clicked,this,[=]{configure();remote_->login(user->text(),pass->text(),[status](bool ok,QString error){status->setText(ok?QObject::tr("已连接"):error);});});return page;
+    auto *buttons=new QHBoxLayout;auto *registerButton=button(tr("注册"));auto *loginButton=button(tr("登录"),true);auto *logoutButton=button(tr("退出登录"));
+    buttons->addWidget(registerButton);buttons->addWidget(loginButton);buttons->addWidget(logoutButton);buttons->addWidget(status,1);form->addRow(buttons);
+    auto *snapshots=new QListWidget;form->addRow(tr("远程快照"),snapshots);auto *remoteActions=new QHBoxLayout;auto *refreshButton=button(tr("刷新"));auto *uploadButton=button(tr("上传本地快照"),true);auto *downloadButton=button(tr("下载到本地仓库"));auto *deleteButton=button(tr("删除"));remoteActions->addWidget(refreshButton);remoteActions->addWidget(uploadButton);remoteActions->addWidget(downloadButton);remoteActions->addWidget(deleteButton);form->addRow(remoteActions);
+    auto *note=new QLabel(tr("连接使用 TLS 加密，备份数据按账户隔离存储。"));note->setWordWrap(true);note->setProperty("muted",true);form->addRow(note);layout->addWidget(remote);layout->addStretch();
+    auto configure=[this,endpoint]{remote_->configure(QUrl(endpoint->text()),"remote/"+QUrl(endpoint->text()).host());};
+    auto refresh=[this,snapshots,status,configure]{configure();remote_->listSnapshots([snapshots,status](QJsonArray values,QString error){snapshots->clear();if(!error.isEmpty()){status->setText(error);return;}for(auto value:values){auto object=value.toObject();auto *item=new QListWidgetItem(object["name"].toString(object["id"].toString()));item->setData(Qt::UserRole,object["id"].toString());snapshots->addItem(item);}status->setText(QObject::tr("已连接，%1 个快照").arg(values.size()));});};
+    connect(registerButton,&QPushButton::clicked,this,[=]{configure();remote_->registerUser(user->text(),pass->text(),[status](bool ok,QString error){status->setText(ok?QObject::tr("注册成功，请登录"):error);});});connect(loginButton,&QPushButton::clicked,this,[=]{configure();remote_->login(user->text(),pass->text(),[=](bool ok,QString error){status->setText(ok?QObject::tr("已连接"):error);if(ok)refresh();});});connect(logoutButton,&QPushButton::clicked,this,[=]{remote_->logout([status,snapshots](bool ok,QString error){status->setText(ok?QObject::tr("已退出"):error);if(ok)snapshots->clear();});});connect(refreshButton,&QPushButton::clicked,this,refresh);
+    connect(uploadButton,&QPushButton::clicked,this,[=]{QString root=QFileDialog::getExistingDirectory(this,tr("选择本地增量仓库"));if(root.isEmpty())return;QDir directory(root+"/snapshots");QStringList manifests=directory.entryList({"*.manifest"},QDir::Files,QDir::Time);if(manifests.isEmpty()){QMessageBox::information(this,tr("无可用快照"),tr("所选仓库中没有快照。"));return;}QStringList ids;for(auto name:manifests)ids<<name.left(name.size()-9);bool ok=false;QString id=QInputDialog::getItem(this,tr("选择快照"),tr("快照"),ids,0,false,&ok);if(!ok)return;cancelled_=false;setBusy(true,tr("正在上传快照…"));remoteRepository_->uploadSnapshot(root,id,&cancelled_,[this](int value,QString path){progress_->setValue(value);progressDetails_->setText(tr("正在上传 · %1").arg(path));},[=](bool success,QString error){setBusy(false);if(success){QMessageBox::information(this,tr("上传完成"),tr("快照已保存到远程服务器。"));refresh();}else QMessageBox::warning(this,tr("上传失败"),error);});});
+    connect(downloadButton,&QPushButton::clicked,this,[=]{auto *item=snapshots->currentItem();if(!item)return;QString root=QFileDialog::getExistingDirectory(this,tr("选择本地仓库目录"));if(root.isEmpty())return;cancelled_=false;setBusy(true,tr("正在下载快照…"));remoteRepository_->downloadSnapshot(item->data(Qt::UserRole).toString(),root,&cancelled_,[this](int value,QString path){progress_->setValue(value);progressDetails_->setText(tr("正在下载 · %1").arg(path));},[this](bool success,QString error){setBusy(false);if(success)QMessageBox::information(this,tr("下载完成"),tr("快照已保存到本地仓库。"));else QMessageBox::warning(this,tr("下载失败"),error);});});
+    connect(deleteButton,&QPushButton::clicked,this,[=]{auto *item=snapshots->currentItem();if(!item)return;if(QMessageBox::question(this,tr("删除快照"),tr("确定删除选中的远程快照？"))!=QMessageBox::Yes)return;remote_->deleteSnapshot(item->data(Qt::UserRole).toString(),[=](bool ok,QString error){if(ok)refresh();else QMessageBox::warning(this,tr("删除失败"),error);});});return page;
 }
 
-QWidget *MainWindow::createSettingsPage(){QVBoxLayout *layout=nullptr;QWidget *page=createPageShell(tr("设置"),tr("应用启动、后台行为和诊断设置。"),&layout);auto *group=new QGroupBox(tr("系统集成"));auto *box=new QVBoxLayout(group);auto *startup=new QCheckBox(tr("登录 Windows 后自动启动 DBackup"));QSettings run("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",QSettings::NativeFormat);startup->setChecked(run.contains("DBackup"));connect(startup,&QCheckBox::toggled,this,[](bool enabled){QSettings settings("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",QSettings::NativeFormat);if(enabled)settings.setValue("DBackup",QString("\"")+QCoreApplication::applicationFilePath()+"\"");else settings.remove("DBackup");});box->addWidget(startup);auto *tray=new QLabel(tr("关闭主窗口时程序保持在系统托盘；请使用托盘菜单中的“退出”完全停止。"));tray->setWordWrap(true);tray->setProperty("muted",true);box->addWidget(tray);layout->addWidget(group);layout->addStretch();return page;}
-
-QWidget *MainWindow::createPlaceholderPage(const QString &title, const QString &subtitle, const QStringList &items) {
-    QVBoxLayout *layout = nullptr; QWidget *page = createPageShell(title, subtitle, &layout);
-    auto *card = new QGroupBox(tr("规划中的模块")); auto *box = new QVBoxLayout(card);
-    for (const QString &item : items) { auto *label = new QLabel(QStringLiteral("○  ") + item); label->setProperty("muted", true); box->addWidget(label); }
-    auto *badge = new QLabel(tr("将在后续 Sprint 中接入")); badge->setStyleSheet("background:#dbeafe;color:#1d4ed8;border-radius:6px;padding:7px 10px;"); badge->setMaximumWidth(190); box->addSpacing(8); box->addWidget(badge);
-    layout->addWidget(card); layout->addStretch(); return page;
-}
+QWidget *MainWindow::createSettingsPage(){QVBoxLayout *layout=nullptr;QWidget *page=createPageShell(tr("设置"),tr("设置应用启动和后台运行方式。"),&layout);auto *group=new QGroupBox(tr("系统集成"));auto *box=new QVBoxLayout(group);auto *startup=new QCheckBox(tr("登录 Windows 后自动启动 DBackup"));QSettings run("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",QSettings::NativeFormat);startup->setChecked(run.contains("DBackup"));connect(startup,&QCheckBox::toggled,this,[](bool enabled){QSettings settings("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",QSettings::NativeFormat);if(enabled)settings.setValue("DBackup",QString("\"")+QCoreApplication::applicationFilePath()+"\"");else settings.remove("DBackup");});box->addWidget(startup);auto *tray=new QLabel(tr("关闭主窗口时程序保持在系统托盘；请使用托盘菜单中的“退出”完全停止。"));tray->setWordWrap(true);tray->setProperty("muted",true);box->addWidget(tray);layout->addWidget(group);layout->addStretch();return page;}
 
 void MainWindow::addSources(bool directory) {
     QStringList paths;
@@ -292,7 +314,7 @@ void MainWindow::startBackup() {
     if(incremental&&options.password.empty()){QMessageBox::information(this,tr("需要仓库密码"),tr("增量仓库必须设置密码，以保护数据块和快照清单。"));return;}
     cancelled_=false;setBusy(true, tr("正在创建备份归档…")); appendLog(tr("开始备份到 %1").arg(target));
     QThread *worker = QThread::create([this, sources, target, options,incremental] {
-        OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{if(p.totalFiles)progress_->setValue(static_cast<int>(100*p.completedFiles/p.totalFiles));statusBar()->showMessage(QString::fromUtf8(p.currentPath.c_str()));},Qt::QueuedConnection);};
+        OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);};
         std::string error;bool ok=false;if(incremental){LocalRepository repository(target.toUtf8().toStdString());SnapshotOptions snapshot;snapshot.sources=sources;snapshot.password=options.password;snapshot.filter=options.filter;SnapshotInfo info;ok=repository.createSnapshot(snapshot,info,error,context);}else ok=Packer::pack(sources, target.toUtf8().toStdString(), options, error,context);
         QMetaObject::invokeMethod(this, [this, ok, target, error] { setBusy(false); if (ok) { appendLog(tr("备份完成：%1").arg(target)); QMessageBox::information(this, tr("备份完成"), tr("归档已安全写入：\n%1").arg(target)); }
             else { appendLog(tr("备份失败：%1").arg(QString::fromUtf8(error.c_str())), true); QMessageBox::critical(this, tr("备份失败"), QString::fromUtf8(error.c_str())); } }, Qt::QueuedConnection);
@@ -304,11 +326,27 @@ void MainWindow::startRestore() {
     const QString archive = archivePath_->text().trimmed(), target = restoreTarget_->text().trimmed(), password = restorePassword_->text();
     if (archive.isEmpty() || target.isEmpty()) { QMessageBox::information(this, tr("无法开始恢复"), tr("请选择归档文件和恢复目录。")); return; }
     cancelled_=false;setBusy(true, tr("正在恢复文件…")); appendLog(tr("开始从 %1 恢复").arg(archive));
-    QThread *worker = QThread::create([this, archive, target, password] {OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{if(p.totalFiles)progress_->setValue(static_cast<int>(100*p.completedFiles/p.totalFiles));statusBar()->showMessage(QString::fromUtf8(p.currentPath.c_str()));},Qt::QueuedConnection);}; std::string error; const bool ok = Packer::unpack(archive.toUtf8().toStdString(), target.toUtf8().toStdString(), error, password.toUtf8().toStdString(),context);
+    QThread *worker = QThread::create([this, archive, target, password] {OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);}; std::string error; const bool ok = Packer::unpack(archive.toUtf8().toStdString(), target.toUtf8().toStdString(), error, password.toUtf8().toStdString(),context);
         QMetaObject::invokeMethod(this, [this, ok, target, error] { setBusy(false); if (ok) { appendLog(tr("恢复完成：%1").arg(target)); QMessageBox::information(this, tr("恢复完成"), tr("文件已恢复到：\n%1").arg(target)); }
             else { appendLog(tr("恢复失败：%1").arg(QString::fromUtf8(error.c_str())), true); QMessageBox::critical(this, tr("恢复失败"), QString::fromUtf8(error.c_str())); } }, Qt::QueuedConnection);
     }); connect(worker, &QThread::finished, worker, &QObject::deleteLater); worker->start();
 }
 
-void MainWindow::setBusy(bool busy, const QString &message) { busy_ = busy; backupButton_->setEnabled(!busy); restoreButton_->setEnabled(!busy);cancelButton_->setVisible(busy); if (busy) { progress_->setRange(0, 100);progress_->setValue(0); statusBar()->showMessage(message); } else { progress_->setRange(0, 100); progress_->setValue(0); statusBar()->showMessage(tr("就绪")); } }
+void MainWindow::updateProgress(const OperationProgress &p) {
+    int percent = 0;
+    if (p.totalBytes) percent = static_cast<int>(100 * p.completedBytes / p.totalBytes);
+    else if (p.totalFiles) percent = static_cast<int>(100 * p.completedFiles / p.totalFiles);
+    progress_->setValue(qBound(0, percent, 100));
+    QStringList details{stageName(p.stage)};
+    if (p.totalFiles) details << tr("%1/%2 个项目").arg(p.completedFiles).arg(p.totalFiles);
+    if (p.totalBytes) details << tr("%1/%2").arg(humanSize(p.completedBytes), humanSize(p.totalBytes));
+    if (p.bytesPerSecond > 0) {
+        details << tr("%1/s").arg(humanSize(static_cast<uint64_t>(p.bytesPerSecond)));
+        if (p.totalBytes > p.completedBytes) details << tr("剩余约 %1 秒").arg(static_cast<qulonglong>((p.totalBytes-p.completedBytes)/p.bytesPerSecond));
+    }
+    progressDetails_->setText(details.join(QStringLiteral(" · ")));
+    if (!p.currentPath.empty()) statusBar()->showMessage(QString::fromUtf8(p.currentPath.c_str()));
+}
+
+void MainWindow::setBusy(bool busy, const QString &message) { busy_ = busy; backupButton_->setEnabled(!busy); restoreButton_->setEnabled(!busy);cancelButton_->setVisible(busy); if (busy) { progress_->setRange(0, 100);progress_->setValue(0);progressDetails_->setText(message); statusBar()->showMessage(message); } else { progress_->setRange(0, 100); progress_->setValue(0);progressDetails_->setText(tr("就绪")); statusBar()->showMessage(tr("就绪")); } }
 void MainWindow::appendLog(const QString &message, bool error) { activityLog_->appendPlainText(QString("[%1] %2%3").arg(QDateTime::currentDateTime().toString("HH:mm:ss"), error ? tr("错误：") : QString(), message)); }

@@ -2,7 +2,7 @@
 
 ## 1. 测试目标
 
-验证 Sprint 1、Sprint 2 的打包、还原、压缩、加密、筛选、格式校验和可靠性改进，确认当前版本具备课程阶段演示条件。
+验证 DBackup 本地归档、压缩加密、筛选、元数据、自动化、增量仓库和网络协议的正确性与失败安全性。
 
 ## 2. 测试环境
 
@@ -10,20 +10,19 @@
 |---|---|
 | 操作系统 | Windows |
 | 构建系统 | CMake 4.3.0 |
-| 编译器 | MinGW GCC 8.1.0，C++17 |
+| 编译器 | Qt MinGW GCC 13.1.0，C++17 |
 | 测试框架 | Google Test 1.14.0 |
 | 压缩库 | zlib |
 | 加密接口 | Windows CNG / bcrypt |
-| 构建类型 | Debug |
+| 构建类型 | Release |
 
 ## 3. 测试方法
 
 执行命令：
 
-```powershell
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j 4
-ctest --test-dir build --output-on-failure
+```bash
+cmd.exe /c build.bat test
+./tools/acceptance/acceptance.sh self-test
 ```
 
 测试使用自动创建的隔离目录，完成后删除测试数据。
@@ -60,24 +59,14 @@ ctest --test-dir build --output-on-failure
 | T26 | DirectoryWatcherTest | Windows 递归目录变化通知 |
 | T27 | ArchiveV3AuthenticatedEncryption | v3 AES-GCM、篡改检测和归档取消 |
 | T28 | ArchiveV3SymbolicLinkAndAcl | 安全相对链接和安全描述符（需要系统权限） |
+| T29 | UnicodeAndEmojiFileNamesRoundTrip | 中文和 Emoji 路径的宽字符读取、打包与恢复 |
+| T30 | MultipleSourceDirectoryTimesRoundTrip | 多来源根目录和嵌套目录的修改时间恢复 |
 
 ## 5. 测试结果
 
-最新回归结果：28 项测试已注册，本机 27 项通过、1 项因 Windows 未授予符号链接创建权限而跳过，0 项失败。
+最新回归结果：31 项测试已注册，本机 30 项通过、1 项因 Windows 未授予符号链接创建权限而跳过，0 项失败。
 
-本次完善前共有 12 项测试；新增 10 项测试覆盖：
-
-- 严格筛选参数验证；
-- Windows 文件属性恢复；
-- 未加密 v2 归档篡改检测；
-- 已有归档的原子替换。
-- 目标归档位于源目录时的自包含防护。
-- 单个文件来源和源/目标同路径保护。
-- 多个文件和文件夹组合归档。
-- 六类筛选条件的组合行为。
-- 多扩展名、通配符排除与扫描预览结果一致性。
-
-在新增测试第一次执行时，`2026-02-30` 被日期库自动归一化为三月日期，导致非法日期测试失败。实现随后改为在转换前保存年月日并与转换结果比较，问题已修复。
+独立验收工具自测覆盖确定性数据、哈希比较、mtime 容差、空目录、属性差异、链接不跟随和安全清理拒绝。
 
 ## 6. 需求覆盖情况
 
@@ -91,7 +80,7 @@ ctest --test-dir build --output-on-failure
 | 完整性检查 | 已覆盖 | 手工篡改单字节后拒绝读取 |
 | 自定义筛选 | 部分覆盖 | 解析器和扩展名/尺寸/类型已覆盖；所有者依赖环境 |
 | 原子归档替换 | 已覆盖 | 旧无效归档被完整新归档替换 |
-| GUI 交互 | 人工测试待补 | 自动化测试未直接操作 Win32 控件 |
+| GUI 交互 | 人工验收 | 按 `docs/testing-guide.md` 记录截图和结果 |
 | 超大文件性能 | 未覆盖 | 当前仍是内存式实现 |
 
 ## 7. 建议的人工验收测试
@@ -116,8 +105,8 @@ ctest --test-dir build --output-on-failure
 
 ## 9. 测试结论
 
-当前版本的 Sprint 1–5 核心回归测试为 27 项通过、1 项权限相关跳过，覆盖归档兼容、GCM、增量仓库、Cron 和目录变更通知。Qt 6.8.3 客户端与服务器均已完成 Release 构建；GUI 启动冒烟和 localhost TLS API 联调通过。跨机器发布验证及长期后台运行仍需人工验收。
+核心回归测试为 30 项通过、1 项因系统未授予符号链接权限而跳过，0 项失败。Qt 客户端和服务器已完成 Release 编译。跨机器发布、长期后台运行和实际断网续传必须按验收指南人工记录。
 
 ## 10. 可移植构建验证
 
-项目已在独立构建目录中完成 Release 配置、编译、28 项测试和 CPack ZIP 打包。Qt 6 发布包携带 Widgets、HttpServer、SQLite、平台插件、OpenSSL TLS 后端及所需运行库，并已在全新解压目录完成 GUI 和 HTTPS 服务器冒烟；仍应在未安装 Qt 和开发工具的另一台 Windows 电脑上执行最终验收。
+便携 ZIP 应在未安装 Qt 和开发工具的 Windows 10/11 电脑上执行最终验收，结果不得由开发机构建成功替代。

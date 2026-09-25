@@ -20,6 +20,7 @@ class QSystemTrayIcon;
 class QCloseEvent;
 class JobManager;
 class RemoteClient;
+class RemoteRepositoryService;
 
 class MainWindow final : public QMainWindow {
  public:
@@ -35,7 +36,6 @@ class MainWindow final : public QMainWindow {
     QWidget *createHistoryPage();
     QWidget *createStoragePage();
     QWidget *createSettingsPage();
-    QWidget *createPlaceholderPage(const QString &title, const QString &subtitle, const QStringList &items);
     QWidget *createPageShell(const QString &title, const QString &subtitle, QVBoxLayout **content);
     void addSources(bool directory);
     void removeSelectedSources();
@@ -47,6 +47,7 @@ class MainWindow final : public QMainWindow {
     void chooseRestoreFolder();
     void startRestore();
     void setBusy(bool busy, const QString &message = {});
+    void updateProgress(const OperationProgress &progress);
     void appendLog(const QString &message, bool error = false);
     void updateSourceSummary();
     void updateFilterSummary();
@@ -68,10 +69,12 @@ class MainWindow final : public QMainWindow {
     QPushButton *restoreButton_ = nullptr;
     QPlainTextEdit *activityLog_ = nullptr;
     QProgressBar *progress_ = nullptr;
+    QLabel *progressDetails_ = nullptr;
     QPushButton *cancelButton_ = nullptr;
     QSystemTrayIcon *tray_ = nullptr;
     JobManager *jobs_ = nullptr;
     RemoteClient *remote_ = nullptr;
+    RemoteRepositoryService *remoteRepository_ = nullptr;
     std::atomic_bool cancelled_{false};
     bool quitting_ = false;
     FilterOptions filters_;

@@ -22,6 +22,7 @@
 #include <cwctype>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -145,7 +146,7 @@ bool WriteU32(std::ofstream &out, uint32_t value) {
 }
 
 bool ReadWholeFile(const std::string &path, std::string &data, std::string &error) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(std::filesystem::path(UtoW(path)), std::ios::binary);
     if (!file) {
         error = "无法读取文件: " + path;
         return false;
@@ -189,7 +190,7 @@ bool ReplaceFile(const std::string &temporary, const std::string &destination, s
 
 bool WriteWholeFileAtomic(const std::string &path, const std::string &data, std::string &error) {
     const std::string temporary = TemporaryPath(path);
-    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+    std::ofstream file(std::filesystem::path(UtoW(temporary)), std::ios::binary | std::ios::trunc);
     if (!file) {
         error = "无法创建文件: " + path;
         return false;
@@ -444,6 +445,21 @@ bool CollectSource(const std::string &sourcePath, const std::string &destFile,
     if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
         size_t slash = sourceWide.find_last_of(L"\\/");
         std::string rootName = WtoU(slash == std::wstring::npos ? sourceWide : sourceWide.substr(slash + 1));
+        if (includeDirectoryRoot) {
+            WIN32_FILE_ATTRIBUTE_DATA rootData = {};
+            if (!GetFileAttributesExW(sourceWide.c_str(), GetFileExInfoStandard, &rootData)) {
+                error = "无法读取目录元数据: " + sourcePath;
+                return false;
+            }
+            ArchiveEntry rootEntry;
+            rootEntry.type = 1;
+            rootEntry.relativePath = rootName;
+            rootEntry.mode = rootData.dwFileAttributes;
+            rootEntry.mtimeMs = FileTimeToMs(rootData.ftLastWriteTime);
+            rootEntry.owner = OwnerName(sourceWide);
+            rootEntry.securityDescriptor = SecurityDescriptor(sourceWide);
+            entries.push_back(std::move(rootEntry));
+        }
         return CollectEntries(sourcePath, includeDirectoryRoot ? rootName : "", filter,
                               AbsolutePath(destFile), entries, error);
     }
@@ -863,7 +879,7 @@ bool IsSafeRelativePath(const std::string &path) {
 }
 
 bool ReadFileBytes(const std::string &path, std::vector<uint8_t> &bytes) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(std::filesystem::path(UtoW(path)), std::ios::binary);
     if (!file) return false;
     bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     return !file.bad();
@@ -892,7 +908,7 @@ bool WriteArchiveAtomic(const std::string &destFile,
                         const std::function<bool(std::ofstream &)> &writer,
                         std::string &error) {
     const std::string temporary = TemporaryPath(destFile);
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    std::ofstream out(std::filesystem::path(UtoW(temporary)), std::ios::binary | std::ios::trunc);
     if (!out) {
         error = "无法创建备份文件: " + destFile;
         return false;
@@ -1279,14 +1295,15 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
             }
             if (!WriteWholeFileAtomic(fullPath, entry.data, error)) return false;
         }
-        HANDLE handle = CreateFileW(UtoW(fullPath).c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr, OPEN_EXISTING,
-                                    entry.type == 1 ? FILE_FLAG_BACKUP_SEMANTICS : 0, nullptr);
-        if (handle != INVALID_HANDLE_VALUE) {
-            FILETIME ft = MsToFileTime(entry.mtimeMs);
-            SetFileTime(handle, nullptr, nullptr, &ft);
-            CloseHandle(handle);
+        if (entry.type != 1) {
+            HANDLE handle = CreateFileW(UtoW(fullPath).c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (handle != INVALID_HANDLE_VALUE) {
+                FILETIME ft = MsToFileTime(entry.mtimeMs);
+                SetFileTime(handle, nullptr, nullptr, &ft);
+                CloseHandle(handle);
+            }
         }
-        if (entry.mode != 0 && entry.type != 2) {
+        if (entry.mode != 0 && entry.type != 2 && entry.type != 1) {
             DWORD attributes = entry.mode & ~(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT);
             if (attributes == 0) attributes = FILE_ATTRIBUTE_NORMAL;
             if (!SetFileAttributesW(UtoW(fullPath).c_str(), attributes)) {
@@ -1294,7 +1311,7 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
                 return false;
             }
         }
-        if (!entry.securityDescriptor.empty() && entry.type != 2) {
+        if (!entry.securityDescriptor.empty() && entry.type != 2 && entry.type != 1) {
             SetFileSecurityW(UtoW(fullPath).c_str(), OWNER_SECURITY_INFORMATION |
                 GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                 reinterpret_cast<PSECURITY_DESCRIPTOR>(
@@ -1303,6 +1320,38 @@ bool Packer::unpack(const std::string &archiveFile, const std::string &destDir,
         OperationProgress progress; progress.stage = OperationStage::Restoring;
         progress.currentPath = entry.relativePath; progress.completedFiles = ++completed;
         progress.totalFiles = entries.size(); context.report(progress);
+    }
+    // Creating children changes their parent directory's mtime. Restore directory
+    // metadata only after the complete tree exists, deepest directory first.
+    for (auto iterator = entries.rbegin(); iterator != entries.rend(); ++iterator) {
+        const auto &entry = *iterator;
+        if (entry.type != 1) continue;
+        std::string fullPath = destDir + "\\" + entry.relativePath;
+        std::replace(fullPath.begin(), fullPath.end(), '/', '\\');
+        HANDLE handle = CreateFileW(UtoW(fullPath).c_str(), FILE_WRITE_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            error = "无法打开目录以恢复时间: " + fullPath;
+            return false;
+        }
+        FILETIME ft = MsToFileTime(entry.mtimeMs);
+        if (!SetFileTime(handle, nullptr, nullptr, &ft)) {
+            CloseHandle(handle); error = "无法恢复目录时间: " + fullPath; return false;
+        }
+        CloseHandle(handle);
+        if (entry.mode != 0) {
+            DWORD attributes = entry.mode & ~(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT);
+            if (attributes == 0) attributes = FILE_ATTRIBUTE_NORMAL;
+            if (!SetFileAttributesW(UtoW(fullPath).c_str(), attributes)) {
+                error = "无法恢复目录属性: " + fullPath; return false;
+            }
+        }
+        if (!entry.securityDescriptor.empty()) {
+            SetFileSecurityW(UtoW(fullPath).c_str(), OWNER_SECURITY_INFORMATION |
+                GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                reinterpret_cast<PSECURITY_DESCRIPTOR>(const_cast<uint8_t *>(entry.securityDescriptor.data())));
+        }
     }
     OperationProgress done; done.stage = OperationStage::Completed;
     done.completedFiles = entries.size(); done.totalFiles = entries.size(); context.report(done);

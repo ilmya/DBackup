@@ -344,6 +344,30 @@ TEST_F(PackerTest, FilterByExtensionAndSize) {
     EXPECT_EQ(entries[0].relativePath, "keep.txt");
 }
 
+TEST_F(PackerTest, DirectoryMtimeRestoredAfterChildren) {
+    std::string error;
+    WriteFile(srcDir + "\\nested\\child.txt", "child");
+    const std::string directory = srcDir + "\\nested";
+    HANDLE sourceHandle = CreateFileA(directory.c_str(), FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    ASSERT_NE(sourceHandle, INVALID_HANDLE_VALUE);
+    ULARGE_INTEGER value; value.QuadPart = 116444736000000000ULL + 1700000000000ULL * 10000ULL;
+    FILETIME expected{value.LowPart, value.HighPart};
+    ASSERT_TRUE(SetFileTime(sourceHandle, nullptr, nullptr, &expected)); CloseHandle(sourceHandle);
+
+    ASSERT_TRUE(Packer::pack(srcDir, abkFile, error)) << error;
+    ASSERT_TRUE(Packer::unpack(abkFile, dstDir, error)) << error;
+
+    HANDLE restoredHandle = CreateFileA((dstDir + "\\nested").c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    ASSERT_NE(restoredHandle, INVALID_HANDLE_VALUE);
+    FILETIME actual{}; ASSERT_TRUE(GetFileTime(restoredHandle, nullptr, nullptr, &actual)); CloseHandle(restoredHandle);
+    ULARGE_INTEGER actualValue; actualValue.LowPart=actual.dwLowDateTime; actualValue.HighPart=actual.dwHighDateTime;
+    EXPECT_NEAR(static_cast<double>(actualValue.QuadPart), static_cast<double>(value.QuadPart), 20000000.0);
+}
+
 /** Sprint 2: filter expressions reject invalid values instead of silently ignoring them. */
 TEST(FilterOptionsTest, StrictValidation) {
     FilterOptions filter;
@@ -364,6 +388,64 @@ TEST(FilterOptionsTest, StrictValidation) {
     EXPECT_FALSE(ParseFilterOptions("type=image", filter, error));
     EXPECT_FALSE(ParseFilterOptions("unknown=value", filter, error));
     EXPECT_FALSE(ParseFilterOptions("minsize=20;maxsize=10", filter, error));
+}
+
+TEST_F(PackerTest, UnicodeAndEmojiFileNamesRoundTrip) {
+    const std::string base = CreateTestDir();
+    const std::string source = base + "\\unicode_source";
+    const std::string archive = base + "\\unicode.abk";
+    const std::string restore = base + "\\unicode_restore";
+    ASSERT_TRUE(CreateDirectoryA(source.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS);
+    auto wide = [](const std::string &value) {
+        int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
+        std::wstring result(static_cast<size_t>(size), L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), result.data(), size);
+        return result;
+    };
+    const std::string name = u8"emoji-📦-中文.txt";
+    const std::string original = source + "\\" + name;
+    HANDLE output = CreateFileW(wide(original).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(output, INVALID_HANDLE_VALUE);
+    const char payload[] = "unicode path payload";
+    DWORD written = 0; ASSERT_TRUE(::WriteFile(output, payload, sizeof(payload)-1, &written, nullptr)); CloseHandle(output);
+
+    std::string error; PackOptions options;
+    ASSERT_TRUE(Packer::pack(source, archive, options, error)) << error;
+    ASSERT_TRUE(Packer::unpack(archive, restore, error)) << error;
+    const std::string restored = restore + "\\" + name;
+    HANDLE input = CreateFileW(wide(restored).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    ASSERT_NE(input, INVALID_HANDLE_VALUE);
+    char buffer[64] = {}; DWORD read = 0; ASSERT_TRUE(::ReadFile(input, buffer, sizeof(buffer), &read, nullptr)); CloseHandle(input);
+    EXPECT_EQ(std::string(buffer, read), std::string(payload, sizeof(payload)-1));
+    RemoveTestDir(base);
+}
+
+TEST_F(PackerTest, MultipleSourceDirectoryTimesRoundTrip) {
+    const std::string base = CreateTestDir();
+    const std::string first = base + "\\first", second = base + "\\second";
+    const std::string nested = first + "\\nested", archive = base + "\\directories.abk";
+    const std::string restore = base + "\\restore";
+    CreateDirectoryA(first.c_str(), nullptr); CreateDirectoryA(second.c_str(), nullptr);
+    CreateDirectoryA(nested.c_str(), nullptr); WriteFile(nested + "\\file.txt", "payload");
+    const ULONGLONG ticks = 133400000000000000ULL;
+    FILETIME expected{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32)};
+    auto setTime = [&](const std::string &path) {
+        HANDLE handle = CreateFileA(path.c_str(), FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        ASSERT_NE(handle, INVALID_HANDLE_VALUE); ASSERT_TRUE(SetFileTime(handle, nullptr, nullptr, &expected)); CloseHandle(handle);
+    };
+    setTime(nested); setTime(first); setTime(second);
+    std::string error; PackOptions options;
+    ASSERT_TRUE(Packer::pack(std::vector<std::string>{first, second}, archive, options, error)) << error;
+    ASSERT_TRUE(Packer::unpack(archive, restore, error)) << error;
+    auto expectTime = [&](const std::string &path) {
+        WIN32_FILE_ATTRIBUTE_DATA data{}; ASSERT_TRUE(GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &data));
+        ULARGE_INTEGER actual{}; actual.LowPart=data.ftLastWriteTime.dwLowDateTime; actual.HighPart=data.ftLastWriteTime.dwHighDateTime;
+        EXPECT_LE(actual.QuadPart > ticks ? actual.QuadPart-ticks : ticks-actual.QuadPart, 20000000ULL);
+    };
+    expectTime(restore + "\\first"); expectTime(restore + "\\first\\nested"); expectTime(restore + "\\second");
+    RemoveTestDir(base);
 }
 
 /** Sprint 1: Windows file attributes are preserved by the v2 round trip. */
@@ -484,7 +566,7 @@ TEST_F(PackerTest, MultipleBackupSources) {
                              abkFile, options, error)) << error;
     std::vector<ArchiveEntry> entries;
     ASSERT_TRUE(Packer::readArchive(abkFile, entries, error)) << error;
-    ASSERT_EQ(entries.size(), 3u);  // two files and one nested file (parent is created on restore)
+    ASSERT_EQ(entries.size(), 4u);  // two files, the selected folder metadata, and its nested file
 
     ASSERT_TRUE(Packer::unpack(abkFile, dstDir, error)) << error;
     EXPECT_EQ(ReadFile(dstDir + "\\first.txt"), "first");

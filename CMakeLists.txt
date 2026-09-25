@@ -54,7 +54,8 @@ if(DBACKUP_BUILD_GUI)
         main.cpp gui/main_window.cpp gui/main_window.h
         gui/filter_dialog.cpp gui/filter_dialog.h gui/theme.h
         automation/job_manager.cpp automation/job_manager.h
-        network/remote_client.cpp network/remote_client.h)
+        network/remote_client.cpp network/remote_client.h
+        network/remote_repository_service.cpp network/remote_repository_service.h)
     target_include_directories(BackupTool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(BackupTool PRIVATE Qt6::Widgets Qt6::Network dbackup_core)
     set_target_properties(BackupTool PROPERTIES WIN32_EXECUTABLE TRUE OUTPUT_NAME "BackupTool")
@@ -103,7 +104,10 @@ if(BUILD_TESTS)
 endif()
 
 install(FILES README.md DESTINATION .)
-install(DIRECTORY docs DESTINATION .)
+install(FILES
+    docs/user-guide.md docs/server-guide.md docs/testing-guide.md
+    docs/acceptance-test-cases.md docs/troubleshooting.md docs/release-notes.md
+    DESTINATION docs)
 set(CPACK_PACKAGE_NAME "DBackup")
 set(CPACK_PACKAGE_VENDOR "BackupTool Team")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
