@@ -237,7 +237,7 @@ QWidget *MainWindow::createHistoryPage() {
     auto *path=new QLineEdit,*password=new QLineEdit;password->setEchoMode(QLineEdit::Password);auto *browse=button(tr("选择仓库…")),*load=button(tr("加载历史"),true);auto *row=new QHBoxLayout;row->addWidget(path,1);row->addWidget(browse);row->addWidget(password);row->addWidget(load);layout->addLayout(row);
     auto *table=new QTableWidget(0,3);table->setHorizontalHeaderLabels({tr("快照 ID"),tr("创建时间"),tr("状态")});table->horizontalHeader()->setStretchLastSection(true);layout->addWidget(table);
     connect(browse,&QPushButton::clicked,this,[this,path]{QString p=QFileDialog::getExistingDirectory(this,tr("选择仓库"));if(!p.isEmpty())path->setText(p);});connect(load,&QPushButton::clicked,this,[this,path,table]{LocalRepository repo(path->text().toUtf8().toStdString());std::vector<SnapshotInfo>all;std::string error;if(!repo.listSnapshots(all,error)){QMessageBox::warning(this,tr("读取失败"),QString::fromUtf8(error.c_str()));return;}table->setRowCount(0);for(auto&s:all){int r=table->rowCount();table->insertRow(r);table->setItem(r,0,new QTableWidgetItem(QString::fromStdString(s.id)));table->setItem(r,1,new QTableWidgetItem(QDateTime::fromMSecsSinceEpoch(s.createdAtMs).toString("yyyy-MM-dd HH:mm:ss")));table->setItem(r,2,new QTableWidgetItem(tr("可恢复")));}});
-    auto *restore=button(tr("恢复所选快照"),true);layout->addWidget(restore,0,Qt::AlignRight);connect(restore,&QPushButton::clicked,this,[this,path,password,table]{if(table->currentRow()<0)return;QString dest=QFileDialog::getExistingDirectory(this,tr("恢复到"));if(dest.isEmpty())return;LocalRepository repo(path->text().toUtf8().toStdString());std::string error;bool ok=repo.restoreSnapshot(table->item(table->currentRow(),0)->text().toStdString(),dest.toUtf8().toStdString(),password->text().toUtf8().toStdString(),error);QMessageBox::information(this,ok?tr("恢复完成"):tr("恢复失败"),ok?tr("快照已恢复"):QString::fromUtf8(error.c_str()));});return page;
+    auto *restore=button(tr("恢复所选快照"),true);layout->addWidget(restore,0,Qt::AlignRight);connect(restore,&QPushButton::clicked,this,[this,path,password,table]{if(table->currentRow()<0)return;QString dest=QFileDialog::getExistingDirectory(this,tr("恢复到"));if(dest.isEmpty())return;LocalRepository repo(path->text().toUtf8().toStdString());std::string error;bool ok=repo.restoreSnapshot(table->item(table->currentRow(),0)->text().toStdString(),dest.toUtf8().toStdString(),password->text().toUtf8().toStdString(),error);if(!ok)QMessageBox::critical(this,tr("恢复失败"),QString::fromUtf8(error.c_str()));else if(!error.empty())QMessageBox::warning(this,tr("恢复完成（部分权限未恢复）"),QString::fromUtf8(error.c_str()));else QMessageBox::information(this,tr("恢复完成"),tr("快照已恢复"));});return page;
 }
 
 QWidget *MainWindow::createStoragePage() {
@@ -295,7 +295,7 @@ void MainWindow::previewFilters() {
     const auto sources = sourcePaths(); if (sources.empty()) { QMessageBox::information(this, tr("扫描预览"), tr("请先添加至少一个备份来源。")); return; }
     setBusy(true, tr("正在扫描文件元数据…")); const FilterOptions filters = filters_;
     QThread *worker = QThread::create([this, sources, filters] {
-        BackupPreview preview; std::string error; const bool ok = Packer::preview(sources, filters, preview, error);
+        BackupPreview preview; std::string error; const bool ok = ArchiveService::preview(sources, filters, preview, error);
         QMetaObject::invokeMethod(this, [this, ok, preview, error] {
             setBusy(false); if (!ok) { QMessageBox::warning(this, tr("预览失败"), QString::fromUtf8(error.c_str())); appendLog(tr("扫描预览失败：%1").arg(QString::fromUtf8(error.c_str())), true); return; }
             previewSummary_->setText(tr("预计包含 %1 个文件、%2 个文件夹，共 %3；排除 %4 个文件")
@@ -315,7 +315,7 @@ void MainWindow::startBackup() {
     cancelled_=false;setBusy(true, tr("正在创建备份归档…")); appendLog(tr("开始备份到 %1").arg(target));
     QThread *worker = QThread::create([this, sources, target, options,incremental] {
         OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);};
-        std::string error;bool ok=false;if(incremental){LocalRepository repository(target.toUtf8().toStdString());SnapshotOptions snapshot;snapshot.sources=sources;snapshot.password=options.password;snapshot.filter=options.filter;SnapshotInfo info;ok=repository.createSnapshot(snapshot,info,error,context);}else ok=Packer::pack(sources, target.toUtf8().toStdString(), options, error,context);
+        std::string error;bool ok=false;if(incremental){LocalRepository repository(target.toUtf8().toStdString());SnapshotOptions snapshot;snapshot.sources=sources;snapshot.password=options.password;snapshot.filter=options.filter;SnapshotInfo info;ok=repository.createSnapshot(snapshot,info,error,context);}else ok=ArchiveService::create(sources, target.toUtf8().toStdString(), options, error,context);
         QMetaObject::invokeMethod(this, [this, ok, target, error] { setBusy(false); if (ok) { appendLog(tr("备份完成：%1").arg(target)); QMessageBox::information(this, tr("备份完成"), tr("归档已安全写入：\n%1").arg(target)); }
             else { appendLog(tr("备份失败：%1").arg(QString::fromUtf8(error.c_str())), true); QMessageBox::critical(this, tr("备份失败"), QString::fromUtf8(error.c_str())); } }, Qt::QueuedConnection);
     }); connect(worker, &QThread::finished, worker, &QObject::deleteLater); worker->start();
@@ -326,8 +326,9 @@ void MainWindow::startRestore() {
     const QString archive = archivePath_->text().trimmed(), target = restoreTarget_->text().trimmed(), password = restorePassword_->text();
     if (archive.isEmpty() || target.isEmpty()) { QMessageBox::information(this, tr("无法开始恢复"), tr("请选择归档文件和恢复目录。")); return; }
     cancelled_=false;setBusy(true, tr("正在恢复文件…")); appendLog(tr("开始从 %1 恢复").arg(archive));
-    QThread *worker = QThread::create([this, archive, target, password] {OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);}; std::string error; const bool ok = Packer::unpack(archive.toUtf8().toStdString(), target.toUtf8().toStdString(), error, password.toUtf8().toStdString(),context);
-        QMetaObject::invokeMethod(this, [this, ok, target, error] { setBusy(false); if (ok) { appendLog(tr("恢复完成：%1").arg(target)); QMessageBox::information(this, tr("恢复完成"), tr("文件已恢复到：\n%1").arg(target)); }
+    QThread *worker = QThread::create([this, archive, target, password] {OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);}; std::string error; const bool ok = ArchiveService::extract(archive.toUtf8().toStdString(), target.toUtf8().toStdString(), error, password.toUtf8().toStdString(),context);
+        QMetaObject::invokeMethod(this, [this, ok, target, error] { setBusy(false); if (ok && !error.empty()) { const QString warning=QString::fromUtf8(error.c_str()); appendLog(tr("恢复完成，但权限未完全恢复：%1").arg(target), true); QMessageBox::warning(this, tr("恢复完成（权限未完全恢复）"), warning); }
+            else if (ok) { appendLog(tr("恢复完成：%1").arg(target)); QMessageBox::information(this, tr("恢复完成"), tr("文件已恢复到：\n%1").arg(target)); }
             else { appendLog(tr("恢复失败：%1").arg(QString::fromUtf8(error.c_str())), true); QMessageBox::critical(this, tr("恢复失败"), QString::fromUtf8(error.c_str())); } }, Qt::QueuedConnection);
     }); connect(worker, &QThread::finished, worker, &QObject::deleteLater); worker->start();
 }

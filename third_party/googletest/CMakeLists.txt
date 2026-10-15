@@ -1,27 +1,16 @@
-# Note: CMake support is community-based. The maintainers do not use CMake
-# internally.
+cmake_minimum_required(VERSION 3.21)
 
-cmake_minimum_required(VERSION 3.13)
+project(googletest-minimal LANGUAGES CXX)
 
-project(googletest-distribution)
-set(GOOGLETEST_VERSION 1.14.0)
+add_library(gtest STATIC googletest/src/gtest-all.cc)
+target_include_directories(gtest
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/googletest/include
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/googletest)
+target_compile_features(gtest PUBLIC cxx_std_14)
+add_library(GTest::gtest ALIAS gtest)
 
-if(NOT CYGWIN AND NOT MSYS AND NOT ${CMAKE_SYSTEM_NAME} STREQUAL QNX)
-  set(CMAKE_CXX_EXTENSIONS OFF)
-endif()
-
-enable_testing()
-
-include(CMakeDependentOption)
-include(GNUInstallDirs)
-
-#Note that googlemock target already builds googletest
-option(BUILD_GMOCK "Builds the googlemock subproject" ON)
-option(INSTALL_GTEST "Enable installation of googletest. (Projects embedding googletest may want to turn this OFF.)" ON)
-option(GTEST_HAS_ABSL "Use Abseil and RE2. Requires Abseil and RE2 to be separately added to the build." OFF)
-
-if(BUILD_GMOCK)
-  add_subdirectory( googlemock )
-else()
-  add_subdirectory( googletest )
-endif()
+add_library(gtest_main STATIC googletest/src/gtest_main.cc)
+target_link_libraries(gtest_main PUBLIC gtest)
+add_library(GTest::gtest_main ALIAS gtest_main)

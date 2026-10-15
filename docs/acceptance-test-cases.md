@@ -31,20 +31,20 @@ Git commit：
 从仓库根目录运行：
 
 ```bash
-./tools/acceptance/acceptance.sh self-test
-./tools/acceptance/acceptance.sh generate
+./tests/acceptance.sh self-test
+./tests/acceptance.sh generate --root D:/DBackup-Acceptance
 ```
 
 默认生成到 `D:\DBackup-Acceptance`。没有 D 盘时必须显式指定安全目录：
 
 ```bash
-./tools/acceptance/acceptance.sh generate --root E:/DBackup-Acceptance
+./tests/acceptance.sh generate --root E:/DBackup-Acceptance
 ```
 
 基础恢复完成后执行独立比较：
 
 ```bash
-./tools/acceptance/acceptance.sh compare \
+./tests/acceptance.sh compare \
   --source D:/DBackup-Acceptance/fixtures/normal \
   --restored D:/DBackup-Acceptance/restore/normal \
   --report D:/DBackup-Acceptance/reports/S1-PACK-001.md
@@ -53,16 +53,16 @@ Git commit：
 增量仓库统计：
 
 ```bash
-./tools/acceptance/acceptance.sh inspect-repository \
+./tests/acceptance.sh inspect-repository \
   --repository D:/DBackup-Acceptance/repositories/local \
-  --report D:/DBackup-Acceptance/reports/repository-v1.md
+  --report D:/DBackup-Acceptance/reports/repository-baseline.md
 ```
 
 清理必须显式确认，且只接受带有效安全标记的测试根目录：
 
 ```bash
-./tools/acceptance/acceptance.sh restore-permissions
-./tools/acceptance/acceptance.sh cleanup --yes
+./tests/acceptance.sh restore-permissions --root D:/DBackup-Acceptance
+./tests/acceptance.sh cleanup --root D:/DBackup-Acceptance --yes
 ```
 
 测试密码统一使用 `DBackup-Acceptance-Only!2026`，禁止复用真实密码。
@@ -92,16 +92,16 @@ Git commit：
 
 | 编号 | 类型 | 前置条件与数据 | 操作步骤 | 预期结果与成功判据 | 实际结果 | 状态 | 证据 | 缺陷 |
 |---|---|---|---|---|---|---|---|---|
-| S2-COMP-001 | 自动+GUI | `compression\repeat-16m.bin` | 分别用不压缩、zlib 备份并比较归档大小，恢复后比较 | zlib 归档明显更小，两份恢复 SHA-256 一致 |  |  |  |  |
-| S2-COMP-002 | 自动+GUI | `compression\random-16m.bin` | 用 zlib 备份恢复 | 不应因数据不可压缩失败；恢复 SHA-256 一致 |  |  |  |  |
+| S2-COMP-001 | 自动+GUI | `compression\repeat-4m.bin` | 分别用不压缩、zlib 备份并比较归档大小，恢复后比较 | zlib 归档明显更小，两份恢复 SHA-256 一致 |  |  |  |  |
+| S2-COMP-002 | 自动+GUI | `compression\random-4m.bin` | 用 zlib 备份恢复 | 不应因数据不可压缩失败；恢复 SHA-256 一致 |  |  |  |  |
 | S2-COMP-003 | 人工 | 不同压缩等级 | 分别生成归档并记录时间、大小 | 所有等级均可恢复；等级选择真实生效 |  |  |  |  |
 | S2-CRYPT-001 | 自动+GUI | 已知明文文件，测试密码 | 加密备份，用正确密码恢复并比较 | 恢复通过；归档中不能直接检索到已知明文 |  |  |  |  |
 | S2-CRYPT-002 | 人工 | 加密归档 | 使用错误密码恢复 | 明确失败，不输出被视为成功的恢复结果 |  |  |  |  |
 | S2-CRYPT-003 | 人工 | 加密归档副本 | 修改中间一个字节，再恢复 | GCM 认证失败并中止，不静默输出损坏数据 |  |  |  |  |
-| S2-CRYPT-004 | 人工 | v1、v2、v3 示例归档 | 分别读取和恢复 | v1/v2 兼容读取，v3 正常恢复，结果正确 |  |  |  |  |
+| S2-CRYPT-004 | 自动+人工 | 空文件、随机文件和人为破坏头部的 `.abk` 文件 | 分别尝试读取和恢复 | 无效格式均被明确拒绝；程序生成的归档正常恢复 |  |  |  |  |
 | S2-FILTER-PATH-001 | 自动+GUI | `filters` | 仅包含 `documents`，排除 `build/cache`，预览后备份恢复 | 预览和实际恢复集合一致，仅包含预期路径 |  |  |  |  |
 | S2-FILTER-TYPE-001 | 自动+GUI | 文档、图片、音频、视频、压缩包、代码样本 | 逐个使用类型预设 | 每种预设只包含对应样本，预览与恢复一致 |  |  |  |  |
-| S2-FILTER-NAME-001 | 自动+GUI | `report-2026.txt`、`REPORT-UPPER.TXT`、无关文件 | 测试前缀、通配符、扩展名和大小写 | 匹配规则表现明确，预览与恢复一致 |  |  |  |  |
+| S2-FILTER-NAME-001 | 自动+GUI | `documents/report-final.txt`、`images/REPORT-UPPER.PNG`、`names/unrelated.dat` | 测试前缀、通配符、扩展名和大小写 | 匹配规则表现明确，预览与恢复一致 |  |  |  |  |
 | S2-FILTER-TIME-001 | 自动+GUI | 今天、3/10/40 天前文件 | 测试今天、最近 7 天、最近 30 天和自定义边界 | 边界包含规则明确，结果与文件时间一致 |  |  |  |  |
 | S2-FILTER-SIZE-001 | 自动+GUI | 1 KiB、1/5/10 MiB | 设置最小、最大及 B/KB/MB/GB 单位 | 边界文件包含正确，非法范围被拒绝 |  |  |  |  |
 | S2-FILTER-USER-001 | 自动+人工 | 当前用户文件 | 按当前用户筛选 | 当前用户文件被包含，预览与恢复一致 |  |  |  |  |
@@ -114,8 +114,8 @@ Git commit：
 先执行：
 
 ```bash
-./tools/acceptance/acceptance.sh prepare-links
-./tools/acceptance/acceptance.sh prepare-permissions
+./tests/acceptance.sh prepare-links --root D:/DBackup-Acceptance
+./tests/acceptance.sh prepare-permissions --root D:/DBackup-Acceptance
 ```
 
 如返回 3，应在开发者模式或管理员终端重试；仍不可用则记录 `BLOCKED/SKIP`。
@@ -134,12 +134,15 @@ Git commit：
 | S3-CRON-004 | 人工 | 已有有效快照，随后制造来源权限失败 | 等待任务失败 | 失败被记录，不淘汰最后一个有效版本 |  |  |  |  |
 | S3-CRON-005 | 人工 | 已保存任务 | 退出并重新启动程序 | 任务、密码引用、启用状态和下次时间恢复；JSON 无明文密码 |  |  |  |  |
 | S3-CRON-006 | 人工 | 同一任务执行时间超过调度周期 | 等待再次到期 | 不并发重复运行同一任务，或明确排队 |  |  |  |  |
+| S3-CRON-007 | 自动 | JobManager 注入固定本地时钟，Cron=`* * * * *` | 将时钟推进到下次执行分钟，调用一次计划检查，再重复检查 | 到期任务仅启动一次；下次运行时间推进到下一分钟 |  |  |  |  |
+| S3-CRON-008 | 自动 | JobManager 执行器保持任务运行 | 对同一任务连续调用“立即运行”，完成后删除任务并报告完成 | 重复请求最多排队一次；已删除任务不会产生孤立重跑 |  |  |  |  |
 | S3-REALTIME-001 | 人工 | 监控 `fixtures\realtime` | 分别创建、修改、重命名、删除文件 | 每类事件最终反映到新快照，恢复后状态正确 |  |  |  |  |
 | S3-REALTIME-002 | 人工 | 同一文件快速保存 10 次 | 在 3 秒内连续写入 | 事件被合并，不产生 10 个快照；最终内容正确 |  |  |  |  |
 | S3-REALTIME-003 | 人工 | 持续变化超过 30 秒 | 每秒修改一次 | 最长等待到达后仍会执行，不无限推迟 |  |  |  |  |
 | S3-REALTIME-004 | 人工 | 仓库位于监控来源内 | 触发一次备份并观察 | 仓库写入不再次触发无限备份循环 |  |  |  |  |
 | S3-REALTIME-005 | 人工 | 大量批量复制/重命名 | 制造通知缓冲区压力 | 溢出后完整重扫，最终快照与来源一致 |  |  |  |  |
 | S3-REALTIME-006 | 人工 | 正在监控的目录 | 删除/移动目录，再重新创建 | 进入错误状态并定期重试，恢复后继续监控 |  |  |  |  |
+| S3-REALTIME-007 | 自动 | Windows 临时目录、目录监视器状态回调 | 开始监控后移动监控根目录，确认不可用状态，再以原路径重建目录 | 监视器自动重新打开目录并发出完整重扫请求 |  |  |  |  |
 | S3-TRAY-001 | 人工 | 已启用自动任务 | 关闭主窗口、托盘暂停/继续、显式退出 | 关闭仅隐藏；暂停不触发；继续恢复；退出才终止进程 |  |  |  |  |
 | S3-STARTUP-001 | 人工 | 开启登录启动 | 注销并重新登录 Windows | 程序自动进入可用后台状态，路径和参数正确 |  |  |  |  |
 
@@ -164,22 +167,22 @@ Git commit：
 
 ## 7. Sprint 5：增量、秒传、续传和产品完善
 
-每次快照后执行 `inspect-repository` 保存统计，然后使用 `mutate --version 2` 或 `3` 进入下一数据版本。
+每次快照后执行 `inspect-repository` 保存统计，然后使用 `mutate --version 2` 或 `3` 进入下一测试数据阶段。这里的参数只表示测试数据变化步骤，与软件格式无关。
 
 | 编号 | 类型 | 前置条件与数据 | 操作步骤 | 预期结果与成功判据 | 实际结果 | 状态 | 证据 | 缺陷 |
 |---|---|---|---|---|---|---|---|---|
-| S5-INCR-001 | 自动+GUI | `fixtures\incremental` v1 | 创建首个本地快照并保存仓库统计 | 快照可见并可恢复，结果与 `incremental-v1.json` 一致 |  |  |  |  |
+| S5-INCR-001 | 自动+GUI | `fixtures\incremental` 初始数据 | 创建首个本地快照并保存仓库统计 | 快照可见并可恢复，结果与初始来源清单一致 |  |  |  |  |
 | S5-INCR-002 | 自动+GUI | 来源不变 | 创建第二快照并与基线统计比较 | 不新增数据块或新增量为零；两个版本均可恢复 |  |  |  |  |
-| S5-INCR-003 | 自动+GUI | 执行 `mutate --version 2` | 创建快照，统计新增块，恢复 v1/v2 | 只增加变化相关块；两个版本分别与对应清单一致 |  |  |  |  |
+| S5-INCR-003 | 自动+GUI | 执行 `mutate --version 2` | 创建快照，统计新增块，恢复快照 1/2 | 只增加变化相关块；两个快照分别与对应清单一致 |  |  |  |  |
 | S5-INCR-004 | 自动+GUI | 执行 `mutate --version 3` | 创建快照并恢复 | 首块/尾块、mtime-only、attribute-only 变化均正确处理 |  |  |  |  |
 | S5-INCR-005 | 人工 | 任选块文件副本 | 删除一个块、修改一个块，分别恢复 | 缺块、哈希或 GCM 认证错误都中止恢复并指出块 |  |  |  |  |
 | S5-INCR-006 | 人工 | 创建快照过程中 | 中途点击取消或终止程序 | 不发布不完整快照；已验证块可供下次复用 |  |  |  |  |
-| S5-INCR-007 | 自动+GUI | 5 个版本、保留 3 | 删除旧版本并清理 | 活版本可恢复；仅无引用块被删除 |  |  |  |  |
+| S5-INCR-007 | 自动+GUI | 5 个快照、保留 3 | 删除较早快照并清理 | 保留快照可恢复；仅无引用块被删除 |  |  |  |  |
 | S5-INCR-008 | 人工 | 大量未变化文件 | 第二次快照观察磁盘读取和耗时 | size+mtime 快速路径生效；若仍全量读取则 FAIL/WARN |  |  |  |  |
 | S5-RESUME-001 | 网络+人工 | 首次远程备份中途断网 | 上传若干块后断网，再恢复网络重试 | 已有块不重传，只上传缺块，最终只提交完整快照 |  |  |  |  |
 | S5-RESUME-002 | 网络+人工 | 已完成远程快照，本地缓存为空 | 下载中途断网后继续 | 已校验块被复用，最终恢复报告无 FAIL |  |  |  |  |
 | S5-RESUME-003 | 网络+人工 | Alice 已有相同块，Bob 没有 | Bob 查询相同哈希 | 去重范围仅限单用户，Bob 仍显示缺块 |  |  |  |  |
-| S5-PROGRESS-001 | GUI+人工 | 64 MiB 或 stress 文件 | 执行本地和远程备份 | 显示阶段、百分比、当前文件、字节、速度和 ETA，数值不明显倒退 |  |  |  |  |
+| S5-PROGRESS-001 | GUI+人工 | `fixtures/normal/stress-512m.bin`（使用 stress 配置生成） | 执行本地和远程备份 | 显示阶段、百分比、当前文件、字节、速度和 ETA，数值不明显倒退 |  |  |  |  |
 | S5-PROGRESS-002 | GUI+人工 | 长任务 | 在扫描、打包、上传、恢复阶段分别取消 | 有响应，不产生不完整快照，GUI 回到可操作状态 |  |  |  |  |
 | S5-HISTORY-001 | GUI+人工 | 多个本地/远程版本 | 搜索、查看、按版本恢复、删除、预览保留策略 | 本地和远程历史均可用，操作对象和结果明确 |  |  |  |  |
 
@@ -205,7 +208,7 @@ Git commit：
 1. `self-test`，确认验收工具自身正常。
 2. Sprint 1 普通 `.abk` 往返和自动比较。
 3. Sprint 2 压缩、加密、六类筛选。
-4. 本地增量 v1/v2/v3 和版本恢复。
+4. 本地增量数据的初始、第二次变化、第三次变化和对应快照恢复。
 5. 权限、链接、非法归档、取消和并发。
 6. 定时、实时、托盘和开机启动。
 7. localhost TLS、双用户隔离和远程历史。
@@ -220,8 +223,8 @@ Git commit：
 先恢复测试 ACL，再执行安全清理：
 
 ```bat
-./tools/acceptance/acceptance.sh restore-permissions
-./tools/acceptance/acceptance.sh cleanup --yes
+./tests/acceptance.sh restore-permissions --root D:/DBackup-Acceptance
+./tests/acceptance.sh cleanup --root D:/DBackup-Acceptance --yes
 ```
 
 正式提交前，将已填写的用例文档复制为一次验收记录，并保留 `reports`、截图、日志和使用的 Git commit；不要把测试密码、真实 Token、真实私钥或用户隐私数据提交到仓库。

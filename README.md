@@ -16,7 +16,7 @@ DBackup 是面向 Windows 10/11 的图形化备份工具，支持便携完整归
 ## 运行环境
 
 - Windows 10 或 Windows 11。
-- 从源码构建需要 CMake 3.21+、Qt 6.5+ Widgets/Network/Sql/HttpServer 和匹配的 MinGW。
+- 从源码构建需要 CMake 3.21+、Qt 6.5+ Widgets/Network/Sql/HttpServer 和匹配的 MinGW。生成包含服务器的便携包还需要 OpenSSL 3 运行库。
 - 独立验收工具需要 Git Bash 和 Python 3。
 - 生成测试证书需要 OpenSSL。
 
@@ -31,10 +31,13 @@ cmd.exe /c build.bat package
 ```
 
 如果 Qt 不在常见安装位置，先将 `QT_ROOT` 设为 Qt kit 目录。
+便携包构建时如果未能自动找到 OpenSSL，请将 `OPENSSL_ROOT_DIR` 设为 OpenSSL 安装目录。
 
-- 客户端：`build/BackupTool.exe`
-- 服务器：`build/DBackupServer.exe`
-- 便携包：`build/DBackup-*.zip`
+- 编译输出：`out/build-release/`（开发构建目录）
+- 自动化测试：`out/build-test/`
+- 便携包：`out/package/DBackup-portable.zip`
+
+需要直接运行软件时，优先解压便携包；该目录已包含所需 Qt、MinGW 和 TLS 运行依赖。
 
 ## 快速使用
 
@@ -51,11 +54,12 @@ cmd.exe /c build.bat package
 在 Git Bash 中运行：
 
 ```bash
-./tools/acceptance/acceptance.sh self-test
-./tools/acceptance/acceptance.sh generate --root D:/DBackup-Acceptance
+./tests/acceptance.sh self-test
+./tests/acceptance.sh generate --root D:/DBackup-Acceptance
+./tests/acceptance.sh run --case S4-REMOTE-001
 ```
 
-工具数据位于仓库之外，不会进入 Git。完整功能、服务器和发布包验收步骤见 [完整验收指南](docs/testing-guide.md)。
+仅用于开发的 `BackupToolTestCli.exe` 可通过 `./tests/acceptance.sh test-cli --help` 查看；它不进入便携包。工具数据位于仓库之外，不会进入 Git。完整功能、服务器和发布包验收步骤见 [完整验收指南](docs/testing-guide.md)。
 
 ## 文档
 
@@ -67,8 +71,12 @@ cmd.exe /c build.bat package
 - [发布说明](docs/release-notes.md)
 - [需求说明](docs/requirements.md)
 - [系统设计](docs/design.md)
+- [Sprint 1-5 完整开发指导](docs/development-guide.md)
+- [需求-设计-测试追踪矩阵](docs/traceability-matrix.md)
 - [测试报告](docs/test-report.md)
 
 ## 安全边界
 
 DBackup Server 用于本机或受信局域网，不应直接暴露到公网。首次连接自签名证书时必须核对 SHA-256 指纹。活动命名管道和 Windows 设备对象不会被伪装成普通文件备份。
+
+归档、增量仓库和任务配置由当前程序统一创建和读取。验收时请始终使用本次构建生成的测试数据与备份文件。

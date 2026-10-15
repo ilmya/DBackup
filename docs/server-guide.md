@@ -1,11 +1,21 @@
 # DBackup Server 使用指南
 
+以下命令从仓库根目录的 Git Bash 执行。先构建并解压可运行的便携包：
+
+```bash
+cmd.exe /c build.bat package
+mkdir -p out/package/acceptance
+python -m zipfile -e out/package/DBackup-portable.zip out/package/acceptance
+PORTABLE_DIR="$(find out/package/acceptance -mindepth 1 -maxdepth 1 -type d -print -quit)"
+```
+
 ## 1. 准备证书
 
 在 Git Bash 中运行：
 
 ```bash
-./tools/acceptance/acceptance.sh server-cert --output D:/DBackup-Server/cert
+./tests/acceptance.sh generate --root D:/DBackup-Acceptance --profile standard
+./tests/acceptance.sh server-cert --output D:/DBackup-Acceptance/server-data/manual/cert
 ```
 
 命令会生成有效期 30 天、仅供本机验收的证书和私钥。私钥不得提交到 Git。
@@ -13,10 +23,11 @@
 ## 2. 启动服务器
 
 ```bash
-./build/DBackupServer.exe \
-  --data D:/DBackup-Server/data \
-  --cert D:/DBackup-Server/cert/server-cert.pem \
-  --key D:/DBackup-Server/cert/server-key.pem \
+PORTABLE_DIR="$(find out/package/acceptance -mindepth 1 -maxdepth 1 -type d -print -quit)"
+"$PORTABLE_DIR/DBackupServer.exe" \
+  --data D:/DBackup-Acceptance/server-data/manual/data \
+  --cert D:/DBackup-Acceptance/server-data/manual/cert/server-cert.pem \
+  --key D:/DBackup-Acceptance/server-data/manual/cert/server-key.pem \
   --listen 127.0.0.1 \
   --port 8443
 ```
@@ -28,12 +39,12 @@
 在第二个 Git Bash 窗口运行：
 
 ```bash
-./tools/acceptance/acceptance.sh server-smoke \
-  --server https://127.0.0.1:8443 \
-  --report D:/DBackup-Acceptance/reports/server-smoke.md
+./tests/acceptance.sh server-smoke \
+  --root D:/DBackup-Acceptance \
+  --server https://127.0.0.1:8443
 ```
 
-报告中的注册、登录、状态和快照列表应全部为 `PASS`。
+成功时命令输出 JSON 且退出码为 0。它会通过实际客户端执行注册、认证、快照上传与删除、分块隔离和恢复校验。测试账号会留在服务端数据库中，测试快照和令牌会清理；因此应使用专用、可丢弃的数据目录，不要连接生产服务器。
 
 ## 4. 客户端连接
 

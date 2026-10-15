@@ -35,10 +35,6 @@ Testing/
 *.gcda
 *.gcno
 
-# 性能分析
-gmon.out
-*.prof
-
 # 备份文件生成的 .abk
 *.abk
 
