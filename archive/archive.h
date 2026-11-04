@@ -50,14 +50,13 @@ struct PackOptions {
 };
 
 struct ArchiveEntry {
-    uint8_t     type;           // 0 = file, 1 = directory, 2 = link/reparse point
+    uint8_t     type;           // 0 = file, 1 = directory, 2 = symbolic link, 3 = hard link
     uint8_t     flags = 0;      // bit 0 = zlib-compressed payload
     std::string relativePath;   // UTF-8 relative path
-    uint32_t    mode = 0;       // Windows file attributes
+    uint32_t    mode = 0;       // POSIX file mode
     int64_t     mtimeMs = 0;    // modification time in milliseconds
     std::string owner;          // UTF-8 owner name, if available
-    std::string linkTarget;     // relative symbolic-link/junction target
-    std::vector<uint8_t> securityDescriptor;  // self-relative owner/group/DACL
+    std::string linkTarget;     // symbolic-link or hard-link target
     uint64_t    originalSize = 0;
     std::string data;           // decoded file data; empty for directories
 };

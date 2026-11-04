@@ -2,14 +2,12 @@
 """Independent acceptance-data and comparison tool for DBackup.
 
 This program deliberately does not import or inspect DBackup code or manifests.
-It uses only Python's standard library and documented Windows APIs/commands.
+It uses Python's standard library and Linux filesystem interfaces.
 """
 
 from __future__ import annotations
 
 import argparse
-import ctypes
-from ctypes import wintypes
 import datetime as dt
 import getpass
 import hashlib
@@ -34,12 +32,9 @@ import urllib.request
 
 TOOL_VERSION = "1.0"
 MARKER = ".dbackup-acceptance.json"
-DEFAULT_ROOT = Path(r"D:\DBackup-Acceptance")
+DEFAULT_ROOT = Path.home() / "DBackup-Acceptance"
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_BLOCKED, EXIT_SAFETY = 0, 1, 2, 3, 4
-FILE_ATTRIBUTE_READONLY = 0x1
-FILE_ATTRIBUTE_HIDDEN = 0x2
-FILE_ATTRIBUTE_ARCHIVE = 0x20
-FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+READONLY_MARKER = 0x1
 
 
 class SafetyError(RuntimeError):
@@ -50,11 +45,6 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def win_long(path: Path) -> str:
-    # Path.resolve() follows reparse points and would inspect the target instead
-    # of the link itself. Get an absolute spelling without dereferencing it.
-    value = os.path.abspath(os.fspath(path))
-    return value if value.startswith("\\\\?\\") else "\\\\?\\" + value
 
 
 def run(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -68,8 +58,6 @@ def repo_root() -> Path:
 
 def normalize_root(value: str | None, *, require_drive: bool = True) -> Path:
     root = Path(value).expanduser().resolve() if value else DEFAULT_ROOT.resolve()
-    if value is None and require_drive and not Path(root.drive + "\\").exists():
-        raise SafetyError("默认 D: 盘不存在，请显式传入 --root <安全目录>")
     anchor = Path(root.anchor).resolve()
     home = Path.home().resolve()
     repository = repo_root()
@@ -150,9 +138,8 @@ def set_mtime(path: Path, days_ago: int, hour: int = 12) -> None:
 
 
 def set_attributes(path: Path, attributes: int) -> None:
-    if os.name == "nt":
-        ctypes.windll.kernel32.SetFileAttributesW(win_long(path), attributes)
-
+    mode = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(mode & ~0o222 if attributes & READONLY_MARKER else mode | 0o200)
 
 def generate_fixtures(root: Path, profile: str, reset: bool) -> None:
     if root.exists() and any(root.iterdir()):
@@ -187,8 +174,7 @@ def generate_fixtures(root: Path, profile: str, reset: bool) -> None:
         ("multi-block.bin", 12 * 1024 * 1024, "random"),
         ("large-64m.bin", 64 * 1024 * 1024, "random")):
         write_pattern(normal / name, size, kind)
-    set_attributes(normal / "hello.txt", FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_READONLY)
-    set_attributes(normal / "中文文件名.txt", FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_HIDDEN)
+    set_attributes(normal / "hello.txt", READONLY_MARKER)
 
     compression = root / "fixtures/compression"
     write_pattern(compression / "repeat-16m.bin", 16 * 1024 * 1024, "repeat")
@@ -224,7 +210,7 @@ def generate_fixtures(root: Path, profile: str, reset: bool) -> None:
     (permissions / "denied-read.txt").write_text("permission failure fixture", encoding="utf-8")
     (permissions / "readonly.txt").write_text("read only", encoding="utf-8")
     (permissions / "no-inheritance.txt").write_text("custom ACL", encoding="utf-8")
-    set_attributes(permissions / "readonly.txt", FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_READONLY)
+    set_attributes(permissions / "readonly.txt", READONLY_MARKER)
 
     incremental = root / "fixtures/incremental"
     write_pattern(incremental / "large-12m.bin", 12 * 1024**2, "random", 99)
@@ -257,39 +243,12 @@ def generate_fixtures(root: Path, profile: str, reset: bool) -> None:
 
 
 def get_attributes(path: Path) -> int:
-    if os.name != "nt":
-        return 0
-    value = ctypes.windll.kernel32.GetFileAttributesW(win_long(path))
-    return int(value) if value != 0xFFFFFFFF else 0
+    return stat.S_IMODE(path.lstat().st_mode)
 
 
-def get_sddl(path: Path) -> str | None:
-    if os.name != "nt":
-        return None
-    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    descriptor = ctypes.c_void_p()
-    advapi.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
-                                             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-                                             ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
-    result = advapi.GetNamedSecurityInfoW(str(path), 1, 0x1 | 0x2 | 0x4, None, None, None,
-                                          None, ctypes.byref(descriptor))
-    if result:
-        return None
-    text = wintypes.LPWSTR()
-    length = wintypes.DWORD()
-    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
-        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
-        ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(wintypes.DWORD)]
-    ok = advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-        descriptor, 1, 0x1 | 0x2 | 0x4, ctypes.byref(text), ctypes.byref(length))
-    value = text.value if ok else None
-    if text:
-        kernel.LocalFree(text)
-    kernel.LocalFree(descriptor)
-    return value
-
+def get_sddl(path: Path) -> str:
+    info = path.lstat()
+    return f"{info.st_uid}:{info.st_gid}"
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -300,13 +259,14 @@ def sha256_file(path: Path) -> str:
 
 
 def entry_type(path: Path, attributes: int) -> str:
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        try:
-            return "junction" if path.is_dir() and not path.is_symlink() else "symlink"
-        except OSError:
-            return "reparse"
-    return "directory" if path.is_dir() else "file"
-
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(info.st_mode):
+        return "directory"
+    if stat.S_ISREG(info.st_mode):
+        return "file"
+    return "special"
 
 def build_manifest(base: Path) -> dict:
     base = base.resolve()
@@ -419,10 +379,10 @@ def compare_manifests(source: dict, restored: dict, tolerance_ns: int) -> list[d
         add("PASS" if a.get("attributes") == b.get("attributes") else "FAIL", "Attributes", path,
             f"0x{a.get('attributes', 0):X} / 0x{b.get('attributes', 0):X}")
         if a.get("sddl") is None or b.get("sddl") is None:
-            add("SKIP", "ACL", path, "无法读取一侧安全描述符")
+            add("SKIP", "ACL", path, "无法读取一侧属主信息")
         else:
             add("PASS" if a["sddl"] == b["sddl"] else "FAIL", "ACL", path,
-                "SDDL 一致" if a["sddl"] == b["sddl"] else "owner/group/DACL 不同")
+                "UID/GID 一致" if a["sddl"] == b["sddl"] else "UID/GID 不同")
     return results
 
 
@@ -478,53 +438,24 @@ def command_compare(args: argparse.Namespace) -> int:
     return EXIT_FAILED if failures else EXIT_OK
 
 
-def current_user_sid() -> str | None:
-    result = run(["whoami", "/user", "/fo", "csv", "/nh"])
-    if result.returncode:
-        return None
-    parts = [part.strip('"') for part in result.stdout.strip().split('","')]
-    return parts[-1] if parts else None
-
-
 def command_prepare_permissions(args: argparse.Namespace) -> int:
     root = normalize_root(args.root)
     load_marker(root)
-    fixture = root / "fixtures/permissions"
-    target = fixture / "denied-read.txt"
-    backup = root / "evidence/permissions-acl.txt"
+    target = root / "fixtures/permissions/denied-read.txt"
     if not target.exists():
         print("Permission fixture missing; run generate first.", file=sys.stderr)
         return EXIT_USAGE
-    save = run(["icacls", str(target), "/save", str(backup), "/c"])
-    sid = current_user_sid()
-    if save.returncode or not sid:
-        print(save.stdout + save.stderr, file=sys.stderr)
-        return EXIT_BLOCKED
-    deny = run(["icacls", str(target), "/inheritance:r", "/deny", f"*{sid}:(R)"])
-    inherit = run(["icacls", str(fixture / "no-inheritance.txt"), "/inheritance:r"])
-    if deny.returncode or inherit.returncode:
-        print(deny.stdout + deny.stderr + inherit.stdout + inherit.stderr, file=sys.stderr)
-        print("请在管理员终端重试；工具不会自动提权。", file=sys.stderr)
-        return EXIT_BLOCKED
-    print(f"Permission fixtures activated. ACL backup: {backup}")
+    target.chmod(0)
+    print(f"Permission fixture activated: {target}")
     return EXIT_OK
 
 
 def restore_permissions(root: Path) -> int:
     fixture = root / "fixtures/permissions"
-    backup = root / "evidence/permissions-acl.txt"
-    if backup.exists():
-        restored = run(["icacls", str(fixture), "/restore", str(backup), "/c"])
-        if restored.returncode:
-            print(restored.stdout + restored.stderr, file=sys.stderr)
-    reset = run(["icacls", str(fixture), "/reset", "/t", "/c"])
     for path in fixture.glob("*") if fixture.exists() else []:
-        try:
-            set_attributes(path, FILE_ATTRIBUTE_ARCHIVE)
-        except OSError:
-            pass
-    return EXIT_OK if reset.returncode == 0 else EXIT_BLOCKED
-
+        if not path.is_symlink():
+            path.chmod(0o700 if path.is_dir() else 0o600)
+    return EXIT_OK
 
 def command_restore_permissions(args: argparse.Namespace) -> int:
     root = normalize_root(args.root)
@@ -545,28 +476,17 @@ def command_prepare_links(args: argparse.Namespace) -> int:
     outside = root / "outside-sentinel"
     outside.mkdir(exist_ok=True)
     (outside / "secret.txt").write_text("safe sentinel outside source fixture\n", encoding="utf-8")
-    attempts = [
-        ("file symlink", ["cmd", "/d", "/c", "mklink", str(links / "safe-file-link.txt"), "target.txt"]),
-        ("directory symlink", ["cmd", "/d", "/c", "mklink", "/D", str(links / "safe-dir-link"), "target-dir"]),
-        ("junction", ["cmd", "/d", "/c", "mklink", "/J", str(links / "safe-junction"), str(links / "target-dir")]),
-        ("dangerous absolute link", ["cmd", "/d", "/c", "mklink", str(links / "dangerous-absolute.txt"), str(outside / "secret.txt")]),
-    ]
-    failed = []
-    for label, command in attempts:
-        destination = Path(command[-2])
-        if destination.exists() or destination.is_symlink():
-            continue
-        result = run(command)
-        if result.returncode:
-            failed.append(f"{label}: {result.stdout}{result.stderr}".strip())
+    for name, target in (("safe-file-link.txt", "target.txt"), ("safe-dir-link", "target-dir"),
+                         ("dangerous-absolute.txt", str(outside / "secret.txt"))):
+        path = links / name
+        if not path.exists() and not path.is_symlink():
+            path.symlink_to(target)
+    hard = links / "hard-link.txt"
+    if not hard.exists():
+        os.link(links / "target.txt", hard)
     save_json(root / "manifests/links-source.json", build_manifest(links))
-    if failed:
-        print("\n".join(failed), file=sys.stderr)
-        print("符号链接需要 Windows 开发者模式或创建链接权限；Junction 可单独继续测试。", file=sys.stderr)
-        return EXIT_BLOCKED
-    print("Link fixtures created. Dangerous link targets only the acceptance sentinel.")
+    print("Linux symbolic and hard link fixtures created.")
     return EXIT_OK
-
 
 def mutate(root: Path, version: int) -> None:
     load_marker(root)
@@ -589,7 +509,7 @@ def mutate(root: Path, version: int) -> None:
             stream.seek(-64, os.SEEK_END)
             stream.write(b"last-block-change")
         set_mtime(base / "mtime-only.txt", 3)
-        set_attributes(base / "attributes-only.txt", FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_READONLY)
+        set_attributes(base / "attributes-only.txt", READONLY_MARKER)
     save_json(root / f"manifests/incremental-v{version}.json", build_manifest(base))
     print(f"Incremental fixture mutated to version {version}.")
 
@@ -600,30 +520,18 @@ def command_mutate(args: argparse.Namespace) -> int:
 
 
 def command_hold_pipe(args: argparse.Namespace) -> int:
-    if os.name != "nt":
-        return EXIT_BLOCKED
     root = normalize_root(args.root)
-    marker = load_marker(root)
-    name = rf"\\.\pipe\DBackupAcceptance-{marker['uuid']}"
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
-                                        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
-                                        wintypes.DWORD, ctypes.c_void_p]
-    kernel.CreateNamedPipeW.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = kernel.CreateNamedPipeW(name, 0x00000003, 0, 1, 4096, 4096, 0, None)
-    if handle == ctypes.c_void_p(-1).value:
-        print(f"CreateNamedPipe failed: {ctypes.get_last_error()}", file=sys.stderr)
-        return EXIT_BLOCKED
-    print(f"Active named pipe: {name}")
-    print("Press Ctrl+C to close it after the manual backup test.")
+    load_marker(root)
+    fifo = root / "fixtures/links/active-pipe"
+    os.mkfifo(fifo, 0o600)
+    print(f"Named pipe created: {fifo}. Press Ctrl+C to remove it.")
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        kernel.CloseHandle(handle)
         return EXIT_OK
-
+    finally:
+        fifo.unlink(missing_ok=True)
 
 def command_inspect_repository(args: argparse.Namespace) -> int:
     repository = Path(args.repository).resolve()
@@ -660,14 +568,13 @@ def safe_cleanup(root: Path, confirmed: bool) -> None:
     for current, directories, files in os.walk(root, topdown=False, followlinks=False):
         for name in files + directories:
             path = Path(current) / name
-            if get_attributes(path) & FILE_ATTRIBUTE_REPARSE_POINT:
+            if path.is_symlink():
                 continue
             try:
-                set_attributes(path, FILE_ATTRIBUTE_ARCHIVE if path.is_file() else 0x10)
-                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+                os.chmod(path, 0o700 if path.is_dir() else 0o600)
             except OSError:
                 pass
-    shutil.rmtree(win_long(root))
+    shutil.rmtree(root)
 
 
 def command_cleanup(args: argparse.Namespace) -> int:
@@ -693,7 +600,7 @@ def command_server_cert(args: argparse.Namespace) -> int:
     output.mkdir(parents=True, exist_ok=True)
     openssl = shutil.which("openssl")
     if not openssl:
-        raise FileNotFoundError("未找到 openssl；请安装 OpenSSL 或使用 Git for Windows 附带的 openssl")
+        raise FileNotFoundError("未找到 openssl；请安装 OpenSSL")
     cert, key = output / "server-cert.pem", output / "server-key.pem"
     config = output / "openssl-test.cnf"
     config.write_text("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=localhost\n", encoding="ascii")

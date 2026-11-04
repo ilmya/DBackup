@@ -1,142 +1,52 @@
-// Copyright 2026 BackupTool Team. All rights reserved.
-
 #include "crypto.h"
-
-#include <windows.h>
-#include <bcrypt.h>
-
-#include <limits>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <climits>
+#include <memory>
 
 namespace dbackup::crypto {
-namespace {
-
-constexpr size_t kKeySize = 32;
-constexpr size_t kNonceSize = 12;
-constexpr size_t kTagSize = 16;
-
-PUCHAR inputPointer(const std::vector<uint8_t> &input, uint8_t &emptyByte) {
-    return input.empty() ? &emptyByte : const_cast<PUCHAR>(input.data());
+bool randomBytes(std::vector<uint8_t>& out, size_t size) {
+    if (size > INT_MAX) return false;
+    out.resize(size);
+    if (size && RAND_bytes(out.data(), static_cast<int>(size)) != 1) { out.clear(); return false; }
+    return true;
 }
-
-}  // namespace
-
-bool randomBytes(std::vector<uint8_t> &output, size_t size) {
-    if (size > std::numeric_limits<ULONG>::max()) return false;
-    output.resize(size);
-    if (size == 0) return true;
-    return BCryptGenRandom(nullptr, output.data(), static_cast<ULONG>(size),
-                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0;
+bool sha256(const uint8_t* input, size_t size, std::vector<uint8_t>& digest) {
+    if (size && !input) return false;
+    digest.resize(32);
+    unsigned int length = 0;
+    if (EVP_Digest(input, size, digest.data(), &length, EVP_sha256(), nullptr) != 1) { digest.clear(); return false; }
+    digest.resize(length);
+    return true;
 }
-
-bool sha256(const uint8_t *input, size_t size, std::vector<uint8_t> &digest) {
-    if (size > std::numeric_limits<ULONG>::max() || (size != 0 && input == nullptr)) return false;
-
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    DWORD objectSize = 0;
-    DWORD resultSize = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) return false;
-
-    bool ok = BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
-                                reinterpret_cast<PUCHAR>(&objectSize), sizeof(objectSize),
-                                &resultSize, 0) >= 0;
-    std::vector<uint8_t> object(objectSize);
-    digest.assign(32, 0);
-    uint8_t emptyByte = 0;
-    ok = ok && BCryptCreateHash(algorithm, &hash, object.data(), objectSize, nullptr, 0, 0) >= 0;
-    ok = ok && BCryptHashData(hash, size == 0 ? &emptyByte : const_cast<PUCHAR>(input),
-                              static_cast<ULONG>(size), 0) >= 0;
-    ok = ok && BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0) >= 0;
-
-    if (hash) BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (!ok) digest.clear();
-    return ok;
+bool pbkdf2Sha256(const std::string& password, const std::vector<uint8_t>& salt,
+                  uint64_t iterations, std::vector<uint8_t>& key) {
+    if (password.size() > INT_MAX || salt.size() > INT_MAX || key.size() > INT_MAX || !iterations || iterations > INT_MAX) return false;
+    if (PKCS5_PBKDF2_HMAC(password.data(), static_cast<int>(password.size()), salt.data(),
+                          static_cast<int>(salt.size()), static_cast<int>(iterations), EVP_sha256(),
+                          static_cast<int>(key.size()), key.data()) != 1) { key.clear(); return false; }
+    return true;
 }
-
-bool pbkdf2Sha256(const std::string &password, const std::vector<uint8_t> &salt,
-                  uint64_t iterations, std::vector<uint8_t> &key) {
-    if (password.size() > std::numeric_limits<ULONG>::max() ||
-        salt.size() > std::numeric_limits<ULONG>::max() ||
-        key.size() > std::numeric_limits<ULONG>::max() || iterations == 0) return false;
-
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr,
-                                    BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) return false;
-    uint8_t emptyByte = 0;
-    NTSTATUS status = BCryptDeriveKeyPBKDF2(
-        algorithm,
-        password.empty() ? &emptyByte : reinterpret_cast<PUCHAR>(const_cast<char *>(password.data())),
-        static_cast<ULONG>(password.size()),
-        salt.empty() ? &emptyByte : const_cast<PUCHAR>(salt.data()),
-        static_cast<ULONG>(salt.size()), iterations,
-        key.data(), static_cast<ULONG>(key.size()), 0);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (status < 0) key.clear();
-    return status >= 0;
+bool aes256Gcm(bool encrypt, const std::vector<uint8_t>& input, const std::vector<uint8_t>& key,
+               std::vector<uint8_t>& nonce, std::vector<uint8_t>& tag, std::vector<uint8_t>& output) {
+    if (input.size() > INT_MAX || key.size() != 32) return false;
+    if (encrypt && nonce.empty() && !randomBytes(nonce, 12)) return false;
+    if (nonce.size() != 12) return false;
+    if (encrypt) tag.resize(16);
+    if (tag.size() != 16) return false;
+    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    if (!ctx) return false;
+    output.resize(input.size() + 16);
+    int length = 0, total = 0;
+    bool ok = EVP_CipherInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, key.data(), nonce.data(), encrypt ? 1 : 0) == 1;
+    if (!encrypt) ok = ok && EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, 16, tag.data()) == 1;
+    ok = ok && EVP_CipherUpdate(ctx.get(), output.data(), &length, input.data(), static_cast<int>(input.size())) == 1;
+    total = length;
+    ok = ok && EVP_CipherFinal_ex(ctx.get(), output.data() + total, &length) == 1;
+    total += length;
+    if (encrypt) ok = ok && EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, 16, tag.data()) == 1;
+    if (!ok) { output.clear(); return false; }
+    output.resize(total);
+    return true;
 }
-
-bool aes256Gcm(bool encrypt, const std::vector<uint8_t> &input,
-               const std::vector<uint8_t> &key, std::vector<uint8_t> &nonce,
-               std::vector<uint8_t> &tag, std::vector<uint8_t> &output) {
-    if (input.size() > std::numeric_limits<ULONG>::max() || key.size() != kKeySize) return false;
-    if (encrypt && nonce.empty() && !randomBytes(nonce, kNonceSize)) return false;
-    if (nonce.size() != kNonceSize) return false;
-    if (encrypt) tag.assign(kTagSize, 0);
-    if (tag.size() != kTagSize) return false;
-
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_KEY_HANDLE keyHandle = nullptr;
-    DWORD objectSize = 0;
-    DWORD resultSize = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_AES_ALGORITHM, nullptr, 0) < 0) return false;
-    bool ok = BCryptSetProperty(algorithm, BCRYPT_CHAINING_MODE,
-                                reinterpret_cast<PUCHAR>(const_cast<wchar_t *>(BCRYPT_CHAIN_MODE_GCM)),
-                                sizeof(BCRYPT_CHAIN_MODE_GCM), 0) >= 0;
-    ok = ok && BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
-                                 reinterpret_cast<PUCHAR>(&objectSize), sizeof(objectSize),
-                                 &resultSize, 0) >= 0;
-    std::vector<uint8_t> object(objectSize);
-    ok = ok && BCryptGenerateSymmetricKey(algorithm, &keyHandle, object.data(), objectSize,
-                                          const_cast<PUCHAR>(key.data()),
-                                          static_cast<ULONG>(key.size()), 0) >= 0;
-    if (!ok) {
-        if (keyHandle) BCryptDestroyKey(keyHandle);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-        return false;
-    }
-
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth;
-    BCRYPT_INIT_AUTH_MODE_INFO(auth);
-    auth.pbNonce = nonce.data();
-    auth.cbNonce = static_cast<ULONG>(nonce.size());
-    auth.pbTag = tag.data();
-    auth.cbTag = static_cast<ULONG>(tag.size());
-
-    DWORD required = 0;
-    DWORD actual = 0;
-    uint8_t emptyByte = 0;
-    PUCHAR source = inputPointer(input, emptyByte);
-    NTSTATUS status = encrypt
-        ? BCryptEncrypt(keyHandle, source, static_cast<ULONG>(input.size()), &auth,
-                        nullptr, 0, nullptr, 0, &required, 0)
-        : BCryptDecrypt(keyHandle, source, static_cast<ULONG>(input.size()), &auth,
-                        nullptr, 0, nullptr, 0, &required, 0);
-    if (status >= 0) {
-        output.resize(required);
-        PUCHAR destination = output.empty() ? &emptyByte : output.data();
-        status = encrypt
-            ? BCryptEncrypt(keyHandle, source, static_cast<ULONG>(input.size()), &auth,
-                            nullptr, 0, destination, required, &actual, 0)
-            : BCryptDecrypt(keyHandle, source, static_cast<ULONG>(input.size()), &auth,
-                            nullptr, 0, destination, required, &actual, 0);
-        if (status >= 0) output.resize(actual);
-    }
-
-    BCryptDestroyKey(keyHandle);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (status < 0) output.clear();
-    return status >= 0;
-}
-
 }  // namespace dbackup::crypto

@@ -40,7 +40,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.all:
-        result = subprocess.run(["cmd.exe", "/c", "build.bat", "test"], cwd=ROOT)
+        result = subprocess.run(["bash", "build.sh", "test"], cwd=ROOT)
         return result.returncode
 
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
@@ -51,13 +51,13 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    ctest = shutil.which("ctest.exe") or shutil.which("ctest")
+    ctest = shutil.which("ctest")
     if not ctest:
-        print("CTest was not found. Run `cmd.exe /c build.bat test` first or add CMake to PATH.", file=sys.stderr)
+        print("CTest was not found. Run `./build.sh test` first or add CMake to PATH.", file=sys.stderr)
         return 2
     build_dir = ROOT / "out" / "build-test"
     if not (build_dir / "CTestTestfile.cmake").is_file():
-        print("The test build is missing. Run `cmd.exe /c build.bat test` first.", file=sys.stderr)
+        print("The test build is missing. Run `./build.sh test` first.", file=sys.stderr)
         return 2
 
     if "AcceptanceTestCliSmoke" in pattern or "DBackupRemoteClientServerE2E" in pattern:

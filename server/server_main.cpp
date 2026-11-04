@@ -50,7 +50,7 @@ class Store {
     QString chunkPath(qint64 user,const QString&id)const{return root_+"/data/"+QString::number(user)+"/chunks/"+id.left(2)+"/"+id+".blk";}
     bool hasChunk(qint64 user,const QString&id){QSqlQuery q(db_);q.prepare("SELECT 1 FROM chunks WHERE user_id=? AND hash=?");q.addBindValue(user);q.addBindValue(id);return q.exec()&&q.next();}
     bool putChunk(qint64 user,const QString&id,const QByteArray&body,QString&error){
-        if(!validHash(id)||body.size()<=32||body.size()>8*1024*1024||!body.startsWith("DBC1")){error="数据块标识或格式无效";return false;}
+        if(!validHash(id)||body.size()<=36||body.size()>64*1024*1024+36||!body.startsWith("DBCL0001")){error="数据块标识或格式无效";return false;}
         const QString path=chunkPath(user,id);QSqlQuery existing(db_);existing.prepare("SELECT size FROM chunks WHERE user_id=? AND hash=?");existing.addBindValue(user);existing.addBindValue(id);
         if(!existing.exec()){error=existing.lastError().text();return false;}
         if(existing.next()){

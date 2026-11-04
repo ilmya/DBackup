@@ -33,7 +33,7 @@ def main() -> int:
     test_cli = Path(args.test_cli).resolve()
     openssl = Path(args.openssl).resolve()
     if not server_exe.is_file() or not test_cli.is_file() or not openssl.is_file():
-        raise FileNotFoundError("DBackupServer.exe、BackupToolTestCli.exe 或 openssl.exe 不存在")
+        raise FileNotFoundError("DBackupServer、BackupToolTestCli 或 openssl 不存在")
 
     work = root / "server-data" / ("e2e-" + uuid.uuid4().hex)
     work.mkdir(parents=True)

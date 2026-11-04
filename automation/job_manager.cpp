@@ -39,9 +39,8 @@ void JobManager::syncWatchers() {
             const std::string key = jobId + "|" + sourceUtf8;
             const QString sourceRoot = QDir::cleanPath(source);
             QString excluded;
-            if (destination.startsWith(sourceRoot + "/", Qt::CaseInsensitive) ||
-                destination.startsWith(sourceRoot + "\\", Qt::CaseInsensitive)) {
-                excluded = QDir(sourceRoot).relativeFilePath(destination).replace('\\', '/');
+            if (destination.startsWith(sourceRoot + "/", Qt::CaseSensitive)) {
+                excluded = QDir(sourceRoot).relativeFilePath(destination);
             }
 
             auto watcher = std::make_unique<DirectoryWatcher>();
@@ -52,7 +51,7 @@ void JobManager::syncWatchers() {
                     if (!excluded.isEmpty() && !paths.empty() && !fullRescan) {
                         bool onlyOutput = true;
                         for (const auto &path : paths) {
-                            const QString changed = QString::fromUtf8(path.c_str()).replace('\\', '/');
+                            const QString changed = QString::fromUtf8(path.c_str());
                             if (!changed.startsWith(excluded + "/") && changed != excluded) {
                                 onlyOutput = false;
                                 break;

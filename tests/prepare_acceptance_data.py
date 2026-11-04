@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create the compact, repeatable Windows acceptance corpus."""
+"""Create the compact, repeatable Linux acceptance corpus."""
 
 import argparse
 import importlib.util

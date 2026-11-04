@@ -100,18 +100,16 @@ class AcceptanceToolTest(unittest.TestCase):
         with self.assertRaises(tool.SafetyError):
             tool.normalize_root(Path.cwd().anchor, require_drive=False)
 
-    @unittest.skipUnless(os.name == "nt", "Windows attributes")
     def test_attribute_difference_is_reported(self):
         source, restored = self.temp / "source", self.temp / "restored"
         source.mkdir(); restored.mkdir()
         (source / "item.txt").write_text("same", encoding="utf-8")
         (restored / "item.txt").write_text("same", encoding="utf-8")
-        tool.set_attributes(source / "item.txt", tool.FILE_ATTRIBUTE_ARCHIVE | tool.FILE_ATTRIBUTE_HIDDEN)
+        tool.set_attributes(source / "item.txt", tool.READONLY_MARKER)
         results = tool.compare_manifests(tool.build_manifest(source), tool.build_manifest(restored), 2_000_000_000)
         attributes = [item for item in results if item["category"] == "Attributes"]
         self.assertEqual(attributes[0]["status"], "FAIL")
 
-    @unittest.skipUnless(os.name == "nt", "Windows link semantics")
     def test_symlink_is_not_followed_when_available(self):
         root = self.temp / "links"
         root.mkdir()

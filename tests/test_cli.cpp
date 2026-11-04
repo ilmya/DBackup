@@ -72,7 +72,7 @@ bool readRoot(const QString &input, QString &root, QString &error) {
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
     if (parse.error != QJsonParseError::NoError || value.value("kind").toString() != "dbackup-acceptance-root" ||
         value.value("version").toInt() != 1 || !uuidPattern.match(value.value("uuid").toString()).hasMatch() ||
-        recordedRoot.compare(root, Qt::CaseInsensitive) != 0) {
+        recordedRoot.compare(root, Qt::CaseSensitive) != 0) {
         error = "验收标记无效或与实际目录不匹配";
         return false;
     }
@@ -83,15 +83,15 @@ bool insideRoot(const QString &root, const QString &path, QString &normalized, Q
     const QString absolute = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
     const QString relative = QDir(root).relativeFilePath(absolute);
     if (relative == "." || relative == ".." || relative.startsWith("../") ||
-        relative.startsWith("..\\") || QDir::isAbsolutePath(relative)) {
+        QDir::isAbsolutePath(relative)) {
         error = "操作路径必须位于验收测试根目录内部";
         return false;
     }
     QString cursor = absolute;
-    while (cursor.compare(root, Qt::CaseInsensitive) != 0) {
+    while (cursor.compare(root, Qt::CaseSensitive) != 0) {
         const QFileInfo component(cursor);
-        if (component.exists() && component.isSymLink()) {
-            error = "操作路径不能经过符号链接或目录联接";
+        if (component.isSymLink()) {
+            error = "操作路径不能经过符号链接";
             return false;
         }
         const QString parent = QFileInfo(cursor).absolutePath();
@@ -337,7 +337,7 @@ QJsonObject restoredTreeMap(const QString &root) {
     while (it.hasNext()) {
         const QString filePath = it.next();
         const QFileInfo info(filePath);
-        const QString relative = QDir(root).relativeFilePath(filePath).replace('\\', '/');
+        const QString relative = QDir(root).relativeFilePath(filePath);
         if (info.isDir() && !info.isSymLink()) {
             files[relative] = "directory";
             continue;
@@ -364,7 +364,7 @@ QJsonObject sourceTreeMap(const QStringList &sources) {
             while (it.hasNext()) {
                 const QString path = it.next();
                 const QFileInfo entry(path);
-                const QString relative = rootName + "/" + QDir(source).relativeFilePath(path).replace('\\', '/');
+                const QString relative = rootName + "/" + QDir(source).relativeFilePath(path);
                 if (entry.isDir() && !entry.isSymLink()) { expected[relative] = "directory"; continue; }
                 if (entry.isSymLink()) { expected[relative] = "link:" + entry.symLinkTarget(); continue; }
                 QFile file(path);
@@ -441,7 +441,7 @@ bool remoteClientTest(const Arguments &args, QString &error, QJsonObject &data) 
                 [&](int, QString) { uploadProgressSeen = true; cancelUpload.store(true); }, done);
         }, error);
         if (canceledUploadSucceeded || !uploadProgressSeen ||
-            !(error.contains("取消") || error.contains("cancel", Qt::CaseInsensitive))) {
+            !(error.contains("取消") || error.contains("cancel", Qt::CaseSensitive))) {
             if (error.isEmpty()) error = "上传取消没有在首个数据块后生效";
             break;
         }
@@ -488,7 +488,7 @@ bool remoteClientTest(const Arguments &args, QString &error, QJsonObject &data) 
                 [&](int, QString) { downloadProgressSeen = true; cancelDownload.store(true); }, done);
         }, error);
         if (canceledDownloadSucceeded || !downloadProgressSeen ||
-            !(error.contains("取消") || error.contains("cancel", Qt::CaseInsensitive))) {
+            !(error.contains("取消") || error.contains("cancel", Qt::CaseSensitive))) {
             if (error.isEmpty()) error = "下载取消没有在首个数据块后生效";
             break;
         }

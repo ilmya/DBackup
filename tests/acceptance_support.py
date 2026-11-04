@@ -2,8 +2,7 @@
 """Extra safe acceptance operations that supplement the independent toolkit."""
 
 import argparse
-import ctypes
-from ctypes import wintypes
+import fcntl
 from pathlib import Path
 import shutil
 import sys
@@ -75,21 +74,13 @@ def hold_file(args) -> int:
     root = tool.normalize_root(args.root)
     tool.load_marker(root)
     path = contained(root, args.path)
-    if not path.is_file() or sys.platform != "win32":
+    if not path.is_file():
         return tool.EXIT_BLOCKED
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
-                                   ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
-    kernel.CreateFileW.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
-    if handle == wintypes.HANDLE(-1).value:
-        raise PermissionError(ctypes.get_last_error(), "无法独占打开测试文件", str(path))
-    print(f"测试文件已独占锁定：{path}\n按 Enter 释放锁定。")
-    try:
+    with path.open("rb") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print(f"已对测试文件设置 Linux 建议锁：{path}\n按 Enter 释放。")
+        print("注意：Linux 建议锁只限制主动使用 flock 的程序。")
         input()
-    finally:
-        kernel.CloseHandle(handle)
     return tool.EXIT_OK
 
 

@@ -38,8 +38,8 @@ BackupJob makeJob() {
     BackupJob job;
     job.id = "job-test";
     job.name = "Test backup";
-    job.sources = {"C:/dbackup-test/source"};
-    job.destination = "C:/dbackup-test/repository";
+    job.sources = {"/tmp/dbackup-test/source"};
+    job.destination = "/tmp/dbackup-test/repository";
     job.cron = "* * * * *";
     return job;
 }

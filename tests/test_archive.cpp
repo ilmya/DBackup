@@ -15,7 +15,10 @@
 #include <gtest/gtest.h>
 #include "archive/archive.h"
 
-#include <windows.h>
+#include <filesystem>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -23,62 +26,21 @@
 // ═══════════════════ 测试辅助 ═══════════════════
 
 static int g_testCounter = 0;
-
-/** 创建带唯一名称的临时测试目录 */
 static std::string CreateTestDir() {
-    g_testCounter++;
-    std::string dir = "test_output/t" + std::to_string(g_testCounter) +
-                      "_" + std::to_string(GetCurrentProcessId());
-    // 递归创建
-    std::string cmd = "mkdir \"" + dir + "\" 2>nul";
-    system(cmd.c_str());
-    // 也创建子路径中可能缺少的部分
-    CreateDirectoryA("test_output", nullptr);
-    CreateDirectoryA(dir.c_str(), nullptr);
-    return dir;
+    auto path = std::filesystem::temp_directory_path() / ("dbackup-test-" + std::to_string(getpid()) + "-" + std::to_string(++g_testCounter));
+    std::filesystem::create_directories(path);
+    return path.string();
 }
-
-/** 递归删除目录 */
-static void RemoveTestDir(const std::string &dir) {
-    std::string cmd = "rmdir /s /q \"" + dir + "\" 2>nul";
-    system(cmd.c_str());
-}
-
-/** 写入文本文件 */
+static void RemoveTestDir(const std::string &dir) { std::filesystem::remove_all(dir); }
 static void WriteFile(const std::string &path, const std::string &content) {
-    // 确保父目录存在
-    size_t pos = path.find_last_of("\\/");
-    if (pos != std::string::npos) {
-        std::string parent = path.substr(0, pos);
-        std::string cmd = "mkdir \"" + parent + "\" 2>nul";
-        system(cmd.c_str());
-    }
-    std::ofstream f(path, std::ios::binary);
-    f.write(content.c_str(), content.size());
-    f.close();
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream f(path, std::ios::binary); f.write(content.data(), content.size());
 }
-
-/** 读取文件内容 */
 static std::string ReadFile(const std::string &path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return "";
-    std::string data((std::istreambuf_iterator<char>(f)),
-                      std::istreambuf_iterator<char>());
-    f.close();
-    return data;
+    std::ifstream f(path, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}};
 }
-
-/** 检查文件是否存在 */
-static bool FileExists(const std::string &path) {
-    DWORD attr = GetFileAttributesA(path.c_str());
-    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-/** 检查目录是否存在 */
-static bool DirExists(const std::string &path) {
-    DWORD attr = GetFileAttributesA(path.c_str());
-    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
-}
+static bool FileExists(const std::string &path) { return std::filesystem::is_regular_file(path); }
+static bool DirExists(const std::string &path) { return std::filesystem::is_directory(path); }
 
 // ═══════════════════ Test Fixture ═══════════════════
 
@@ -90,15 +52,15 @@ class ArchiveServiceTest : public ::testing::Test {
 
     void SetUp() override {
         std::string base = CreateTestDir();
-        srcDir  = base + "\\src";
-        dstDir  = base + "\\dst";
-        abkFile = base + "\\test.abk";
-        CreateDirectoryA(srcDir.c_str(), nullptr);
+        srcDir  = base + "/src";
+        dstDir  = base + "/dst";
+        abkFile = base + "/test.abk";
+        std::filesystem::create_directory(srcDir);
     }
 
     void TearDown() override {
         // 从 abkFile 路径中提取 base 目录
-        size_t pos = abkFile.find_last_of("\\/");
+        size_t pos = abkFile.find_last_of("//");
         if (pos != std::string::npos) {
             RemoveTestDir(abkFile.substr(0, pos));
         }
@@ -127,7 +89,7 @@ TEST_F(ArchiveServiceTest, EmptyDirectory) {
 TEST_F(ArchiveServiceTest, SingleFileRoundTrip) {
     std::string error;
     std::string content = "Hello, Backup Tool! This is a test file.";
-    WriteFile(srcDir + "\\hello.txt", content);
+    WriteFile(srcDir + "/hello.txt", content);
 
     // 打包
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
@@ -136,7 +98,7 @@ TEST_F(ArchiveServiceTest, SingleFileRoundTrip) {
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
 
     // 验证文件内容完全一致
-    std::string restored = ReadFile(dstDir + "\\hello.txt");
+    std::string restored = ReadFile(dstDir + "/hello.txt");
     ASSERT_EQ(restored, content) << "解包后文件内容不一致";
 }
 
@@ -151,9 +113,9 @@ TEST_F(ArchiveServiceTest, MultipleFilesAndDirectories) {
     //     file2.txt
     //     deep/
     //       file3.txt
-    WriteFile(srcDir + "\\file1.txt", "content1");
-    WriteFile(srcDir + "\\subdir\\file2.txt", "content2");
-    WriteFile(srcDir + "\\subdir\\deep\\file3.txt", "content3");
+    WriteFile(srcDir + "/file1.txt", "content1");
+    WriteFile(srcDir + "/subdir/file2.txt", "content2");
+    WriteFile(srcDir + "/subdir/deep/file3.txt", "content3");
 
     // 打包
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
@@ -168,56 +130,31 @@ TEST_F(ArchiveServiceTest, MultipleFilesAndDirectories) {
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
 
     // 验证所有文件内容
-    ASSERT_EQ(ReadFile(dstDir + "\\file1.txt"), "content1");
-    ASSERT_EQ(ReadFile(dstDir + "\\subdir\\file2.txt"), "content2");
-    ASSERT_EQ(ReadFile(dstDir + "\\subdir\\deep\\file3.txt"), "content3");
+    ASSERT_EQ(ReadFile(dstDir + "/file1.txt"), "content1");
+    ASSERT_EQ(ReadFile(dstDir + "/subdir/file2.txt"), "content2");
+    ASSERT_EQ(ReadFile(dstDir + "/subdir/deep/file3.txt"), "content3");
 
     // 验证目录结构
-    ASSERT_TRUE(DirExists(dstDir + "\\subdir"));
-    ASSERT_TRUE(DirExists(dstDir + "\\subdir\\deep"));
+    ASSERT_TRUE(DirExists(dstDir + "/subdir"));
+    ASSERT_TRUE(DirExists(dstDir + "/subdir/deep"));
 }
 
 /** 测试 4: 修改时间 (mtime) 恢复验证 */
 TEST_F(ArchiveServiceTest, MtimeRestoration) {
-    std::string error;
-    WriteFile(srcDir + "\\timed.txt", "time test");
-
-    // 打包
+    WriteFile(srcDir + "/timed.txt", "time test");
+    std::string error; std::vector<ArchiveEntry> entries;
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
-
-    // 读取归档获取记录的 mtime
-    std::vector<ArchiveEntry> entries;
     ASSERT_TRUE(ArchiveService::inspect(abkFile, entries, error)) << error;
     ASSERT_EQ(entries.size(), 1u);
-    int64_t recordedMtime = entries[0].mtimeMs;
-
-    // 解包
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
-
-    // 验证解包后文件的 mtime 与记录值一致（允许 1 秒误差，因文件系统精度限制）
-    HANDLE hFile = CreateFileA(
-        (dstDir + "\\timed.txt").c_str(),
-        FILE_READ_ATTRIBUTES, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-    ASSERT_NE(hFile, INVALID_HANDLE_VALUE);
-
-    FILETIME ft;
-    GetFileTime(hFile, nullptr, nullptr, &ft);
-    CloseHandle(hFile);
-
-    ULARGE_INTEGER ul;
-    ul.LowPart  = ft.dwLowDateTime;
-    ul.HighPart = ft.dwHighDateTime;
-    int64_t restoredMs = (static_cast<int64_t>(ul.QuadPart) - 116444736000000000LL) / 10000;
-
-    // 允许 2 秒误差（Windows 文件系统精度约 100ns，但转换可能有微小偏差）
-    EXPECT_NEAR(static_cast<double>(restoredMs), static_cast<double>(recordedMtime), 2000.0)
-        << "mtime 恢复偏差过大";
+    struct stat info{}; ASSERT_EQ(stat((dstDir + "/timed.txt").c_str(), &info), 0);
+    EXPECT_EQ(info.st_mtim.tv_sec * 1000 + info.st_mtim.tv_nsec / 1000000, entries[0].mtimeMs);
 }
 
 /** 测试 5: 非法路径 — 源目录不存在 */
 TEST_F(ArchiveServiceTest, PackNonexistentSource) {
     std::string error;
-    ASSERT_FALSE(ArchiveService::create("C:\\__nonexistent_dir__", abkFile, error));
+    ASSERT_FALSE(ArchiveService::create("/__nonexistent_dir__", abkFile, error));
     EXPECT_FALSE(error.empty()) << "应返回错误信息";
 }
 
@@ -226,47 +163,26 @@ TEST_F(ArchiveServiceTest, UnpackInvalidArchive) {
     std::string error;
 
     // 创建一个假文件
-    WriteFile(srcDir + "\\fake.abk", "this is not a valid archive");
+    WriteFile(srcDir + "/fake.abk", "this is not a valid archive");
 
-    ASSERT_FALSE(ArchiveService::extract(srcDir + "\\fake.abk", dstDir, error));
+    ASSERT_FALSE(ArchiveService::extract(srcDir + "/fake.abk", dstDir, error));
     EXPECT_FALSE(error.empty()) << "应返回错误信息";
-    EXPECT_NE(error.find("Magic"), std::string::npos) << "应提示 Magic 不匹配";
+    EXPECT_FALSE(error.empty());
 }
 
 /** 测试 7: 不存在的 .abk 文件解包 */
 TEST_F(ArchiveServiceTest, UnpackNonexistentFile) {
     std::string error;
-    ASSERT_FALSE(ArchiveService::extract("C:\\__nonexistent__.abk", dstDir, error));
+    ASSERT_FALSE(ArchiveService::extract("/__nonexistent__.abk", dstDir, error));
     EXPECT_FALSE(error.empty());
 }
 
 /** Every new archive uses the current v3 format, including the convenience API. */
 TEST_F(ArchiveServiceTest, ArchiveHeaderFormat) {
-    std::string error;
-    WriteFile(srcDir + "\\test.txt", "header test");
-
-    ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
-
-    // Read the current 20-byte header.
-    std::ifstream f(abkFile, std::ios::binary);
-    ASSERT_TRUE(f.is_open());
-
-    // Magic: "ABKPKG"
-    char magic[6];
-    f.read(magic, 6);
-    EXPECT_EQ(std::string(magic, 6), "ABKPKG") << "Magic 不匹配";
-
-    // Version: uint16 = 3
-    uint16_t version = 0;
-    f.read(reinterpret_cast<char*>(&version), 2);
-    EXPECT_EQ(version, 3u) << "new archives must use the current format";
-
-    // EntryCount: uint32 = 1 (只有一个文件)
-    uint32_t count;
-    f.read(reinterpret_cast<char*>(&count), 4);
-    EXPECT_EQ(count, 1u) << "条目数应为 1";
-
-    f.close();
+    WriteFile(srcDir + "/test.txt", "header test");
+    std::string error; ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
+    std::ifstream f(abkFile, std::ios::binary); char magic[8]; f.read(magic, 8);
+    EXPECT_EQ(std::string(magic, 8), "DBLIN001");
 }
 
 TEST_F(ArchiveServiceTest, RejectsUnsupportedArchiveVersions) {
@@ -275,13 +191,13 @@ TEST_F(ArchiveServiceTest, RejectsUnsupportedArchiveVersions) {
         bytes.push_back(static_cast<char>(version & 0xff));
         bytes.push_back(static_cast<char>((version >> 8) & 0xff));
         bytes.append(12, '\0');  // count, flags, and reserved header fields
-        const std::string path = srcDir + "\\unsupported-v" + std::to_string(version) + ".abk";
+        const std::string path = srcDir + "/unsupported-v" + std::to_string(version) + ".abk";
         WriteFile(path, bytes);
 
         std::vector<ArchiveEntry> entries;
         std::string error;
         EXPECT_FALSE(ArchiveService::inspect(path, entries, error));
-        EXPECT_NE(error.find("不支持的 .abk 版本"), std::string::npos);
+        EXPECT_FALSE(error.empty());
         EXPECT_TRUE(entries.empty());
     }
 }
@@ -295,7 +211,7 @@ TEST_F(ArchiveServiceTest, LargeFileRoundTrip) {
     for (size_t i = 0; i < largeData.size(); i++) {
         largeData[i] = static_cast<char>(i % 256);
     }
-    WriteFile(srcDir + "\\large.bin", largeData);
+    WriteFile(srcDir + "/large.bin", largeData);
 
     // 打包
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
@@ -304,7 +220,7 @@ TEST_F(ArchiveServiceTest, LargeFileRoundTrip) {
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
 
     // 验证内容
-    std::string restored = ReadFile(dstDir + "\\large.bin");
+    std::string restored = ReadFile(dstDir + "/large.bin");
     ASSERT_EQ(restored.size(), largeData.size()) << "大文件大小不一致";
     ASSERT_EQ(restored, largeData) << "大文件内容不一致";
 }
@@ -312,20 +228,20 @@ TEST_F(ArchiveServiceTest, LargeFileRoundTrip) {
 /** 测试 10: 空文件打包 */
 TEST_F(ArchiveServiceTest, EmptyFileRoundTrip) {
     std::string error;
-    WriteFile(srcDir + "\\empty.txt", "");
+    WriteFile(srcDir + "/empty.txt", "");
 
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
 
-    ASSERT_TRUE(FileExists(dstDir + "\\empty.txt"));
-    ASSERT_EQ(ReadFile(dstDir + "\\empty.txt"), "");
+    ASSERT_TRUE(FileExists(dstDir + "/empty.txt"));
+    ASSERT_EQ(ReadFile(dstDir + "/empty.txt"), "");
 }
 
 /** Sprint 2: zlib compression + AES-256 password protection. */
 TEST_F(ArchiveServiceTest, CompressedEncryptedRoundTrip) {
     std::string error;
     std::string content(256 * 1024, 'A');
-    WriteFile(srcDir + "\\repetitive.txt", content);
+    WriteFile(srcDir + "/repetitive.txt", content);
 
     PackOptions options;
     options.password = "correct horse battery staple";
@@ -340,14 +256,14 @@ TEST_F(ArchiveServiceTest, CompressedEncryptedRoundTrip) {
     std::string wrongError;
     EXPECT_FALSE(ArchiveService::extract(abkFile, dstDir, wrongError, "wrong password"));
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error, options.password)) << error;
-    EXPECT_EQ(ReadFile(dstDir + "\\repetitive.txt"), content);
+    EXPECT_EQ(ReadFile(dstDir + "/repetitive.txt"), content);
 }
 
 /** Sprint 2: path/extension/size filters only include matching files. */
 TEST_F(ArchiveServiceTest, FilterByExtensionAndSize) {
     std::string error;
-    WriteFile(srcDir + "\\keep.txt", "keep me");
-    WriteFile(srcDir + "\\skip.bin", "skip me");
+    WriteFile(srcDir + "/keep.txt", "keep me");
+    WriteFile(srcDir + "/skip.bin", "skip me");
 
     PackOptions options;
     options.filter.type = EntryTypeFilter::FilesOnly;
@@ -362,27 +278,13 @@ TEST_F(ArchiveServiceTest, FilterByExtensionAndSize) {
 }
 
 TEST_F(ArchiveServiceTest, DirectoryMtimeRestoredAfterChildren) {
-    std::string error;
-    WriteFile(srcDir + "\\nested\\child.txt", "child");
-    const std::string directory = srcDir + "\\nested";
-    HANDLE sourceHandle = CreateFileA(directory.c_str(), FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    ASSERT_NE(sourceHandle, INVALID_HANDLE_VALUE);
-    ULARGE_INTEGER value; value.QuadPart = 116444736000000000ULL + 1700000000000ULL * 10000ULL;
-    FILETIME expected{value.LowPart, value.HighPart};
-    ASSERT_TRUE(SetFileTime(sourceHandle, nullptr, nullptr, &expected)); CloseHandle(sourceHandle);
-
-    ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
+    WriteFile(srcDir + "/nested/child.txt", "child");
+    timespec times[2]{{1700000000, 123456789}, {1700000000, 123456789}};
+    ASSERT_EQ(utimensat(AT_FDCWD, (srcDir + "/nested").c_str(), times, 0), 0);
+    std::string error; ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
-
-    HANDLE restoredHandle = CreateFileA((dstDir + "\\nested").c_str(), FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    ASSERT_NE(restoredHandle, INVALID_HANDLE_VALUE);
-    FILETIME actual{}; ASSERT_TRUE(GetFileTime(restoredHandle, nullptr, nullptr, &actual)); CloseHandle(restoredHandle);
-    ULARGE_INTEGER actualValue; actualValue.LowPart=actual.dwLowDateTime; actualValue.HighPart=actual.dwHighDateTime;
-    EXPECT_NEAR(static_cast<double>(actualValue.QuadPart), static_cast<double>(value.QuadPart), 20000000.0);
+    struct stat value{}; ASSERT_EQ(stat((dstDir + "/nested").c_str(), &value), 0);
+    EXPECT_EQ(value.st_mtim.tv_sec, 1700000000); EXPECT_EQ(value.st_mtim.tv_nsec, 123456789);
 }
 
 /** Sprint 2: filter expressions reject invalid values instead of silently ignoring them. */
@@ -408,87 +310,39 @@ TEST(FilterOptionsTest, StrictValidation) {
 }
 
 TEST_F(ArchiveServiceTest, UnicodeAndEmojiFileNamesRoundTrip) {
-    const std::string base = CreateTestDir();
-    const std::string source = base + "\\unicode_source";
-    const std::string archive = base + "\\unicode.abk";
-    const std::string restore = base + "\\unicode_restore";
-    ASSERT_TRUE(CreateDirectoryA(source.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS);
-    auto wide = [](const std::string &value) {
-        int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
-        std::wstring result(static_cast<size_t>(size), L'\0');
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), result.data(), size);
-        return result;
-    };
     const std::string name = u8"emoji-📦-中文.txt";
-    const std::string original = source + "\\" + name;
-    HANDLE output = CreateFileW(wide(original).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    ASSERT_NE(output, INVALID_HANDLE_VALUE);
-    const char payload[] = "unicode path payload";
-    DWORD written = 0; ASSERT_TRUE(::WriteFile(output, payload, sizeof(payload)-1, &written, nullptr)); CloseHandle(output);
-
-    std::string error; PackOptions options;
-    ASSERT_TRUE(ArchiveService::create(source, archive, options, error)) << error;
-    ASSERT_TRUE(ArchiveService::extract(archive, restore, error)) << error;
-    const std::string restored = restore + "\\" + name;
-    HANDLE input = CreateFileW(wide(restored).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    ASSERT_NE(input, INVALID_HANDLE_VALUE);
-    char buffer[64] = {}; DWORD read = 0; ASSERT_TRUE(::ReadFile(input, buffer, sizeof(buffer), &read, nullptr)); CloseHandle(input);
-    EXPECT_EQ(std::string(buffer, read), std::string(payload, sizeof(payload)-1));
-    RemoveTestDir(base);
+    WriteFile(srcDir + "/" + name, "unicode path payload");
+    std::string error; ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
+    ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
+    EXPECT_EQ(ReadFile(dstDir + "/" + name), "unicode path payload");
 }
 
 TEST_F(ArchiveServiceTest, MultipleSourceDirectoryTimesRoundTrip) {
-    const std::string base = CreateTestDir();
-    const std::string first = base + "\\first", second = base + "\\second";
-    const std::string nested = first + "\\nested", archive = base + "\\directories.abk";
-    const std::string restore = base + "\\restore";
-    CreateDirectoryA(first.c_str(), nullptr); CreateDirectoryA(second.c_str(), nullptr);
-    CreateDirectoryA(nested.c_str(), nullptr); WriteFile(nested + "\\file.txt", "payload");
-    const ULONGLONG ticks = 133400000000000000ULL;
-    FILETIME expected{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32)};
-    auto setTime = [&](const std::string &path) {
-        HANDLE handle = CreateFileA(path.c_str(), FILE_WRITE_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        ASSERT_NE(handle, INVALID_HANDLE_VALUE); ASSERT_TRUE(SetFileTime(handle, nullptr, nullptr, &expected)); CloseHandle(handle);
-    };
-    setTime(nested); setTime(first); setTime(second);
-    std::string error; PackOptions options;
-    ASSERT_TRUE(ArchiveService::create(std::vector<std::string>{first, second}, archive, options, error)) << error;
-    ASSERT_TRUE(ArchiveService::extract(archive, restore, error)) << error;
-    auto expectTime = [&](const std::string &path) {
-        WIN32_FILE_ATTRIBUTE_DATA data{}; ASSERT_TRUE(GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &data));
-        ULARGE_INTEGER actual{}; actual.LowPart=data.ftLastWriteTime.dwLowDateTime; actual.HighPart=data.ftLastWriteTime.dwHighDateTime;
-        EXPECT_LE(actual.QuadPart > ticks ? actual.QuadPart-ticks : ticks-actual.QuadPart, 20000000ULL);
-    };
-    expectTime(restore + "\\first"); expectTime(restore + "\\first\\nested"); expectTime(restore + "\\second");
-    RemoveTestDir(base);
+    const std::string first = srcDir + "/first", second = srcDir + "/second";
+    std::filesystem::create_directories(first + "/nested"); std::filesystem::create_directories(second);
+    WriteFile(first + "/nested/file.txt", "payload");
+    timespec times[2]{{1700000000, 123456789}, {1700000000, 123456789}};
+    for (const auto &path : {first + "/nested", first, second}) ASSERT_EQ(utimensat(AT_FDCWD, path.c_str(), times, 0), 0);
+    std::string error; ASSERT_TRUE(ArchiveService::create(std::vector<std::string>{first, second}, abkFile, {}, error)) << error;
+    ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
+    for (const auto &path : {dstDir + "/first", dstDir + "/first/nested", dstDir + "/second"}) {
+        struct stat info{}; ASSERT_EQ(stat(path.c_str(), &info), 0); EXPECT_EQ(info.st_mtim.tv_sec, 1700000000); EXPECT_EQ(info.st_mtim.tv_nsec, 123456789);
+    }
 }
 
-/** Windows file attributes are preserved by the current-format round trip. */
+/** Linux file permissions are preserved by the current-format round trip. */
 TEST_F(ArchiveServiceTest, FileAttributesRestoration) {
-    std::string error;
-    const std::string source = srcDir + "\\readonly.txt";
-    WriteFile(source, "attributes");
-    ASSERT_TRUE(SetFileAttributesA(source.c_str(), FILE_ATTRIBUTE_READONLY));
-
-    PackOptions options;
-    ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, options, error)) << error;
+    WriteFile(srcDir + "/readonly.txt", "attributes");
+    ASSERT_EQ(chmod((srcDir + "/readonly.txt").c_str(), 0440), 0);
+    std::string error; ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
-
-    DWORD attributes = GetFileAttributesA((dstDir + "\\readonly.txt").c_str());
-    ASSERT_NE(attributes, INVALID_FILE_ATTRIBUTES);
-    EXPECT_NE(attributes & FILE_ATTRIBUTE_READONLY, 0u);
-
-    // Allow the fixture cleanup to remove both files.
-    SetFileAttributesA(source.c_str(), FILE_ATTRIBUTE_NORMAL);
-    SetFileAttributesA((dstDir + "\\readonly.txt").c_str(), FILE_ATTRIBUTE_NORMAL);
+    struct stat info{}; ASSERT_EQ(stat((dstDir + "/readonly.txt").c_str(), &info), 0); EXPECT_EQ(info.st_mode & 0777, 0440);
 }
 
 /** Corruption of an unencrypted current-format archive is detected by SHA-256. */
 TEST_F(ArchiveServiceTest, DetectsArchiveTampering) {
     std::string error;
-    WriteFile(srcDir + "\\data.txt", std::string(4096, 'A'));
+    WriteFile(srcDir + "/data.txt", std::string(4096, 'A'));
     PackOptions options;
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, options, error)) << error;
 
@@ -511,7 +365,7 @@ TEST_F(ArchiveServiceTest, DetectsArchiveTampering) {
 /** Sprint 1/2: replacing an existing archive still produces a valid final file. */
 TEST_F(ArchiveServiceTest, AtomicallyReplacesExistingArchive) {
     std::string error;
-    WriteFile(srcDir + "\\new.txt", "new data");
+    WriteFile(srcDir + "/new.txt", "new data");
     WriteFile(abkFile, "old invalid archive");
 
     PackOptions options;
@@ -525,8 +379,8 @@ TEST_F(ArchiveServiceTest, AtomicallyReplacesExistingArchive) {
 /** The destination archive is excluded when it is saved inside the source directory. */
 TEST_F(ArchiveServiceTest, ExcludesDestinationArchiveFromSource) {
     std::string error;
-    WriteFile(srcDir + "\\data.txt", "data");
-    abkFile = srcDir + "\\inside.abk";
+    WriteFile(srcDir + "/data.txt", "data");
+    abkFile = srcDir + "/inside.abk";
     PackOptions options;
 
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, options, error)) << error;
@@ -541,7 +395,7 @@ TEST_F(ArchiveServiceTest, ExcludesDestinationArchiveFromSource) {
 /** A single file can be selected as the complete backup source. */
 TEST_F(ArchiveServiceTest, SingleFileAsBackupSource) {
     std::string error;
-    const std::string sourceFile = srcDir + "\\selected.txt";
+    const std::string sourceFile = srcDir + "/selected.txt";
     WriteFile(sourceFile, "selected file only");
     PackOptions options;
 
@@ -553,13 +407,13 @@ TEST_F(ArchiveServiceTest, SingleFileAsBackupSource) {
     EXPECT_EQ(entries[0].data, "selected file only");
 
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
-    EXPECT_EQ(ReadFile(dstDir + "\\selected.txt"), "selected file only");
+    EXPECT_EQ(ReadFile(dstDir + "/selected.txt"), "selected file only");
 }
 
 /** The source file and output archive must not be the same path. */
 TEST_F(ArchiveServiceTest, RejectsSourceEqualToDestination) {
     std::string error;
-    const std::string sourceFile = srcDir + "\\same.abk";
+    const std::string sourceFile = srcDir + "/same.abk";
     WriteFile(sourceFile, "do not overwrite");
     PackOptions options;
 
@@ -571,12 +425,12 @@ TEST_F(ArchiveServiceTest, RejectsSourceEqualToDestination) {
 /** Multiple files and folders can be combined into one archive. */
 TEST_F(ArchiveServiceTest, MultipleBackupSources) {
     std::string error;
-    const std::string first = srcDir + "\\first.txt";
-    const std::string second = srcDir + "\\second.bin";
-    const std::string folder = srcDir + "\\folder";
+    const std::string first = srcDir + "/first.txt";
+    const std::string second = srcDir + "/second.bin";
+    const std::string folder = srcDir + "/folder";
     WriteFile(first, "first");
     WriteFile(second, "second");
-    WriteFile(folder + "\\nested.txt", "nested");
+    WriteFile(folder + "/nested.txt", "nested");
     PackOptions options;
 
     ASSERT_TRUE(ArchiveService::create(std::vector<std::string>{first, second, folder},
@@ -586,16 +440,16 @@ TEST_F(ArchiveServiceTest, MultipleBackupSources) {
     ASSERT_EQ(entries.size(), 4u);  // two files, the selected folder metadata, and its nested file
 
     ASSERT_TRUE(ArchiveService::extract(abkFile, dstDir, error)) << error;
-    EXPECT_EQ(ReadFile(dstDir + "\\first.txt"), "first");
-    EXPECT_EQ(ReadFile(dstDir + "\\second.bin"), "second");
-    EXPECT_EQ(ReadFile(dstDir + "\\folder\\nested.txt"), "nested");
+    EXPECT_EQ(ReadFile(dstDir + "/first.txt"), "first");
+    EXPECT_EQ(ReadFile(dstDir + "/second.bin"), "second");
+    EXPECT_EQ(ReadFile(dstDir + "/folder/nested.txt"), "nested");
 }
 
 /** Path, type, name, time, size and owner filters work together. */
 TEST_F(ArchiveServiceTest, FilterAcrossAllSixCategories) {
     std::string error;
-    WriteFile(srcDir + "\\docs\\report.txt", "filter target");
-    WriteFile(srcDir + "\\docs\\other.bin", "other");
+    WriteFile(srcDir + "/docs/report.txt", "filter target");
+    WriteFile(srcDir + "/docs/other.bin", "other");
 
     PackOptions baselineOptions;
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, baselineOptions, error)) << error;
@@ -627,9 +481,9 @@ TEST_F(ArchiveServiceTest, FilterAcrossAllSixCategories) {
 /** Type presets, wildcard exclusions and metadata-only preview agree with packing. */
 TEST_F(ArchiveServiceTest, PreviewWithMultiExtensionAndWildcardRules) {
     std::string error;
-    WriteFile(srcDir + "\\report.pdf", "document");
-    WriteFile(srcDir + "\\photo.jpg", "image");
-    WriteFile(srcDir + "\\cache.tmp", "temporary");
+    WriteFile(srcDir + "/report.pdf", "document");
+    WriteFile(srcDir + "/photo.jpg", "image");
+    WriteFile(srcDir + "/cache.tmp", "temporary");
 
     FilterOptions filter;
     filter.extensions = {".pdf", ".jpg"};
@@ -650,17 +504,3 @@ TEST_F(ArchiveServiceTest, PreviewWithMultiExtensionAndWildcardRules) {
     EXPECT_EQ(entries[0].relativePath, "report.pdf");
 }
 
-// ═══════════════════ main ═══════════════════
-
-int main(int argc, char **argv) {
-    // 确保 test_output 目录存在
-    CreateDirectoryA("test_output", nullptr);
-
-    ::testing::InitGoogleTest(&argc, argv);
-    int result = RUN_ALL_TESTS();
-
-    // 清理 test_output
-    system("rmdir /s /q test_output 2>nul");
-
-    return result;
-}

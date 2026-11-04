@@ -28,7 +28,10 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QSystemTrayIcon>
-#include <QSettings>
+#include <QDir>
+#include <QFile>
+#include <QSaveFile>
+#include <QStandardPaths>
 #include <QTableWidget>
 #include <QStatusBar>
 #include <QThread>
@@ -140,7 +143,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     appendLog(tr("DBackup 已启动，核心备份服务就绪。"));
     auto *trayMenu=new QMenu(this);trayMenu->addAction(tr("打开 DBackup"),this,[this]{showNormal();raise();activateWindow();});trayMenu->addAction(tr("暂停自动任务"),this,[this]{jobs_->pause(true);});trayMenu->addAction(tr("继续自动任务"),this,[this]{jobs_->pause(false);});trayMenu->addSeparator();trayMenu->addAction(tr("退出"),this,[this]{quitting_=true;qApp->quit();});
     tray_=new QSystemTrayIcon(windowIcon(),this);tray_->setToolTip("DBackup");tray_->setContextMenu(trayMenu);tray_->show();connect(tray_,&QSystemTrayIcon::activated,this,[this](auto reason){if(reason==QSystemTrayIcon::Trigger){showNormal();raise();}});
-    jobs_->setExecutor([this](const BackupJob&job){QThread *worker=QThread::create([this,job]{std::string password,error;CredentialStore::load(("job/"+job.id).toStdString(),password,error);SnapshotOptions options;for(auto&s:job.sources)options.sources.push_back(s.toUtf8().toStdString());options.password=password;options.filter=job.filter;LocalRepository repo(job.destination.toUtf8().toStdString());SnapshotInfo info;bool ok=repo.createSnapshot(options,info,error);if(ok)repo.prune(job.retention,error);QMetaObject::invokeMethod(this,[this,job,ok,error]{jobs_->markFinished(job.id,ok,QString::fromUtf8(error.c_str()));appendLog(ok?tr("自动任务“%1”完成").arg(job.name):tr("自动任务“%1”失败：%2").arg(job.name,QString::fromUtf8(error.c_str())),!ok);},Qt::QueuedConnection);});connect(worker,&QThread::finished,worker,&QObject::deleteLater);worker->start();});
+    jobs_->setExecutor([this](const BackupJob&job){QThread *worker=QThread::create([this,job]{std::string password,error;bool credentialOk=CredentialStore::load(("job/"+job.id).toStdString(),password,error);SnapshotOptions options;for(auto&s:job.sources)options.sources.push_back(s.toUtf8().toStdString());options.password=password;options.filter=job.filter;LocalRepository repo(job.destination.toUtf8().toStdString());SnapshotInfo info;bool ok=credentialOk && repo.createSnapshot(options,info,error);if(ok)ok=repo.prune(job.retention,error);QMetaObject::invokeMethod(this,[this,job,ok,error]{jobs_->markFinished(job.id,ok,QString::fromUtf8(error.c_str()));appendLog(ok?tr("自动任务“%1”完成").arg(job.name):tr("自动任务“%1”失败：%2").arg(job.name,QString::fromUtf8(error.c_str())),!ok);},Qt::QueuedConnection);});connect(worker,&QThread::finished,worker,&QObject::deleteLater);worker->start();});
     jobs_->start();
 }
 
@@ -224,11 +227,11 @@ QWidget *MainWindow::createRestorePage() {
 }
 
 QWidget *MainWindow::createSchedulePage() {
-    QVBoxLayout *layout=nullptr;QWidget *page=createPageShell(tr("任务计划"),tr("持久化 Cron 计划、实时模式和版本保留策略。密码安全保存在 Windows 凭据管理器。"),&layout);
+    QVBoxLayout *layout=nullptr;QWidget *page=createPageShell(tr("任务计划"),tr("持久化 Cron 计划、实时模式和版本保留策略。密码安全保存在系统密钥环。"),&layout);
     auto *table=new QTableWidget(0,6);table->setHorizontalHeaderLabels({tr("名称"),tr("Cron"),tr("下次运行"),tr("保留"),tr("状态"),tr("最近结果")});table->setSelectionBehavior(QAbstractItemView::SelectRows);table->horizontalHeader()->setStretchLastSection(true);
     auto refresh=[this,table]{table->setRowCount(0);for(const auto&j:jobs_->jobs()){int row=table->rowCount();table->insertRow(row);QStringList values={j.name,j.cron,j.nextRun.toString("yyyy-MM-dd HH:mm"),QString::number(j.retention),j.enabled?tr("启用"):tr("停用"),j.lastResult};for(int c=0;c<values.size();++c){auto*item=new QTableWidgetItem(values[c]);item->setData(Qt::UserRole,j.id);table->setItem(row,c,item);}}};
     layout->addWidget(table);auto *actions=new QHBoxLayout;auto *add=button(tr("新建计划"),true),*remove=button(tr("删除")),*reload=button(tr("刷新"));actions->addWidget(add);actions->addWidget(remove);actions->addWidget(reload);actions->addStretch();layout->addLayout(actions);
-    connect(reload,&QPushButton::clicked,this,refresh);connect(add,&QPushButton::clicked,this,[this,refresh]{BackupJob job;bool ok=false;job.name=QInputDialog::getText(this,tr("新建计划"),tr("任务名称"),QLineEdit::Normal,tr("自动备份"),&ok);if(!ok)return;QString source=QFileDialog::getExistingDirectory(this,tr("选择监控来源"));if(source.isEmpty())return;job.sources=QStringList{source};job.destination=QFileDialog::getExistingDirectory(this,tr("选择增量仓库目录"));if(job.destination.isEmpty())return;job.cron=QInputDialog::getText(this,tr("运行计划"),tr("5 段 Cron 表达式"),QLineEdit::Normal,"0 2 * * *",&ok);if(!ok)return;job.retention=QInputDialog::getInt(this,tr("保留策略"),tr("保留最近几个快照"),3,1,999,1,&ok);if(!ok)return;job.realtime=QMessageBox::question(this,tr("实时备份"),tr("是否同时监控目录变化并自动创建快照？"))==QMessageBox::Yes;QString password=QInputDialog::getText(this,tr("仓库密码"),tr("密码"),QLineEdit::Password,{},&ok);if(!ok||password.isEmpty())return;QString error;if(!jobs_->upsert(job,error)){QMessageBox::warning(this,tr("无法保存任务"),error);return;}const auto&saved=jobs_->jobs().last();std::string detail;CredentialStore::save(("job/"+saved.id).toStdString(),password.toUtf8().toStdString(),detail);refresh();});
+    connect(reload,&QPushButton::clicked,this,refresh);connect(add,&QPushButton::clicked,this,[this,refresh]{BackupJob job;bool ok=false;job.name=QInputDialog::getText(this,tr("新建计划"),tr("任务名称"),QLineEdit::Normal,tr("自动备份"),&ok);if(!ok)return;QString source=QFileDialog::getExistingDirectory(this,tr("选择监控来源"));if(source.isEmpty())return;job.sources=QStringList{source};job.destination=QFileDialog::getExistingDirectory(this,tr("选择增量仓库目录"));if(job.destination.isEmpty())return;job.cron=QInputDialog::getText(this,tr("运行计划"),tr("5 段 Cron 表达式"),QLineEdit::Normal,"0 2 * * *",&ok);if(!ok)return;job.retention=QInputDialog::getInt(this,tr("保留策略"),tr("保留最近几个快照"),3,1,999,1,&ok);if(!ok)return;job.realtime=QMessageBox::question(this,tr("实时备份"),tr("是否同时监控目录变化并自动创建快照？"))==QMessageBox::Yes;QString password=QInputDialog::getText(this,tr("仓库密码"),tr("密码"),QLineEdit::Password,{},&ok);if(!ok||password.isEmpty())return;QString error;if(!jobs_->upsert(job,error)){QMessageBox::warning(this,tr("无法保存任务"),error);return;}const auto&saved=jobs_->jobs().last();std::string detail;if(!CredentialStore::save(("job/"+saved.id).toStdString(),password.toUtf8().toStdString(),detail)){QString ignored;jobs_->remove(saved.id,ignored);QMessageBox::warning(this,tr("无法保存凭据"),QString::fromStdString(detail));return;}refresh();});
     connect(remove,&QPushButton::clicked,this,[this,table,refresh]{int row=table->currentRow();if(row<0)return;QString id=table->item(row,0)->data(Qt::UserRole).toString(),error;jobs_->remove(id,error);std::string detail;CredentialStore::remove(("job/"+id).toStdString(),detail);refresh();});refresh();return page;
 }
 
@@ -258,7 +261,35 @@ QWidget *MainWindow::createStoragePage() {
     connect(deleteButton,&QPushButton::clicked,this,[=]{auto *item=snapshots->currentItem();if(!item)return;if(QMessageBox::question(this,tr("删除快照"),tr("确定删除选中的远程快照？"))!=QMessageBox::Yes)return;remote_->deleteSnapshot(item->data(Qt::UserRole).toString(),[=](bool ok,QString error){if(ok)refresh();else QMessageBox::warning(this,tr("删除失败"),error);});});return page;
 }
 
-QWidget *MainWindow::createSettingsPage(){QVBoxLayout *layout=nullptr;QWidget *page=createPageShell(tr("设置"),tr("设置应用启动和后台运行方式。"),&layout);auto *group=new QGroupBox(tr("系统集成"));auto *box=new QVBoxLayout(group);auto *startup=new QCheckBox(tr("登录 Windows 后自动启动 DBackup"));QSettings run("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",QSettings::NativeFormat);startup->setChecked(run.contains("DBackup"));connect(startup,&QCheckBox::toggled,this,[](bool enabled){QSettings settings("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",QSettings::NativeFormat);if(enabled)settings.setValue("DBackup",QString("\"")+QCoreApplication::applicationFilePath()+"\"");else settings.remove("DBackup");});box->addWidget(startup);auto *tray=new QLabel(tr("关闭主窗口时程序保持在系统托盘；请使用托盘菜单中的“退出”完全停止。"));tray->setWordWrap(true);tray->setProperty("muted",true);box->addWidget(tray);layout->addWidget(group);layout->addStretch();return page;}
+QWidget *MainWindow::createSettingsPage() {
+    QVBoxLayout *layout = nullptr;
+    QWidget *page = createPageShell(tr("设置"), tr("设置应用启动和后台运行方式。"), &layout);
+    auto *group = new QGroupBox(tr("系统集成"));
+    auto *box = new QVBoxLayout(group);
+    auto *startup = new QCheckBox(tr("登录桌面时自动启动 DBackup"));
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + "/autostart";
+    const QString path = directory + "/dbackup.desktop";
+    startup->setChecked(QFile::exists(path));
+    connect(startup, &QCheckBox::toggled, this, [this, startup, directory, path](bool enabled) {
+        bool ok = true;
+        if (enabled) {
+            ok = QDir().mkpath(directory);
+            QString executable = QCoreApplication::applicationFilePath();
+            executable.replace("\\", "\\\\").replace("\"", "\\\"").replace("`", "\\`").replace("$", "\\$").replace("%", "%%");
+            QByteArray content = (QString("[Desktop Entry]\nType=Application\nName=DBackup\nExec=\"") + executable + "\"\nTerminal=false\n").toUtf8();
+            QSaveFile file(path);
+            ok = ok && file.open(QIODevice::WriteOnly) && file.write(content) == content.size() && file.commit();
+        } else if (QFile::exists(path)) ok = QFile::remove(path);
+        if (!ok) {
+            startup->blockSignals(true); startup->setChecked(!enabled); startup->blockSignals(false);
+            QMessageBox::warning(this, tr("设置失败"), tr("无法更新桌面自动启动设置。"));
+        }
+    });
+    box->addWidget(startup);
+    auto *tray = new QLabel(tr("关闭主窗口时程序保持在系统托盘；请使用托盘菜单中的“退出”完全停止。"));
+    tray->setWordWrap(true); tray->setProperty("muted", true); box->addWidget(tray);
+    layout->addWidget(group); layout->addStretch(); return page;
+}
 
 void MainWindow::addSources(bool directory) {
     QStringList paths;
