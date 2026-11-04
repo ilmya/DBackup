@@ -1,4 +1,4 @@
-#include "archive/internal.h"
+#include "core/archive_internal.h"
 #include <gtest/gtest.h>
 
 TEST(LinuxArchiveFormat, EncryptedCompressedRoundTripAndCorruption) {

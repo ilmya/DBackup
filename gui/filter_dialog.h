@@ -1,7 +1,7 @@
 #pragma once
 
 #include <QDialog>
-#include "archive/archive.h"
+#include "core/archive.h"
 
 class QCheckBox;
 class QComboBox;

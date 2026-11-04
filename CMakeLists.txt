@@ -19,8 +19,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SECRET REQUIRED IMPORTED_TARGET libsecret-1)
 
 add_library(dbackup_core STATIC
-    archive/archive.cpp core/crypto.cpp core/linux_file.cpp repository/repository.cpp
-    automation/cron.cpp automation/directory_watcher.cpp security/credential_store.cpp)
+    core/archive.cpp core/crypto.cpp core/linux_file.cpp core/repository.cpp
+    automation/cron.cpp automation/directory_watcher.cpp core/credential_store.cpp)
 target_include_directories(dbackup_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dbackup_core PUBLIC ZLIB::ZLIB OpenSSL::Crypto Threads::Threads PkgConfig::SECRET)
 

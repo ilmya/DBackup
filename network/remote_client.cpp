@@ -1,5 +1,5 @@
 #include "network/remote_client.h"
-#include "security/credential_store.h"
+#include "core/credential_store.h"
 namespace {
 bool validRemoteHash(const QString &value) { if(value.size()!=64)return false;for(QChar c:value){const ushort u=c.unicode();if(!((u>='0'&&u<='9')||(u>='a'&&u<='f')))return false;}return true; }
 bool validRemoteSnapshotId(const QString &value) { if(value.size()!=30||value.at(13)!='-')return false;for(int i=0;i<value.size();++i){if(i==13)continue;const ushort u=value.at(i).unicode();if(i<13?!(u>='0'&&u<='9'):!((u>='0'&&u<='9')||(u>='a'&&u<='f')))return false;}return true; }

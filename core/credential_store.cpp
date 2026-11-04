@@ -1,4 +1,4 @@
-#include "security/credential_store.h"
+#include "core/credential_store.h"
 #include <libsecret/secret.h>
 
 namespace {

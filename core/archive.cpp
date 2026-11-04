@@ -1,4 +1,4 @@
-#include "archive/internal.h"
+#include "core/archive_internal.h"
 
 
 
@@ -487,7 +487,7 @@ bool restore(const std::vector<archive_format::Entry> &entries, const fs::path &
 }  // namespace dbackup::archive_restore
 
 
-#include "archive/archive.h"
+#include "core/archive.h"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -625,7 +625,7 @@ bool ParseFilterOptions(const std::string &spec, FilterOptions &filter, std::str
 
 
 
-#include "archive/archive.h"
+#include "core/archive.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>

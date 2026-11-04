@@ -3,7 +3,7 @@
 #include <QMainWindow>
 #include <QStringList>
 #include <atomic>
-#include "archive/archive.h"
+#include "core/archive.h"
 
 class QLabel;
 class QLineEdit;

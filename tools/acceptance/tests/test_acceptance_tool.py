@@ -110,6 +110,22 @@ class AcceptanceToolTest(unittest.TestCase):
         attributes = [item for item in results if item["category"] == "Attributes"]
         self.assertEqual(attributes[0]["status"], "FAIL")
 
+    def test_ownership_difference_is_reported(self):
+        root = self.temp / "ownership"
+        root.mkdir()
+        (root / "item.txt").write_text("same", encoding="utf-8")
+        source = tool.build_manifest(root)
+        restored = tool.build_manifest(root)
+        restored["entries"][0]["uid"] += 1
+        results = tool.compare_manifests(source, restored, 0)
+        self.assertTrue(any(item["category"] == "Ownership" and item["status"] == "FAIL"
+                            for item in results))
+
+    def test_invalid_manifest_schema_is_rejected(self):
+        with self.assertRaises(ValueError):
+            tool.compare_manifests({"schema": 1, "entries": []},
+                                   {"schema": 2, "entries": []}, 0)
+
     def test_symlink_is_not_followed_when_available(self):
         root = self.temp / "links"
         root.mkdir()

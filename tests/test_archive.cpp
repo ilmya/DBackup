@@ -13,7 +13,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "archive/archive.h"
+#include "core/archive.h"
 
 #include <filesystem>
 #include <sys/stat.h>
@@ -83,6 +83,20 @@ TEST_F(ArchiveServiceTest, EmptyDirectory) {
     // 解包后目标目录应为空（没有文件被创建）
     // dstDir 本身会被创建
     ASSERT_TRUE(DirExists(dstDir));
+}
+
+TEST_F(ArchiveServiceTest, UnreadableSourceDoesNotReplaceExistingArchive) {
+    if (geteuid() == 0) GTEST_SKIP() << "root can bypass file permissions";
+    const std::string source = srcDir + "/private.txt";
+    WriteFile(source, "private content");
+    WriteFile(abkFile, "existing archive");
+    ASSERT_EQ(chmod(source.c_str(), 0000), 0);
+    std::string error;
+    const bool success = ArchiveService::create(srcDir, abkFile, error);
+    EXPECT_EQ(chmod(source.c_str(), 0600), 0);
+    EXPECT_FALSE(success);
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(ReadFile(abkFile), "existing archive");
 }
 
 /** 测试 2: 单文件打包与解包 — 内容一致性 */

@@ -7,8 +7,8 @@ add_executable(BackupToolTests
     test_linux_format.cpp
     test_linux_restore.cpp
     test_linux_archive.cpp
-    test_repository_linux.cpp
-    test_sprint345.cpp
+    test_repository.cpp
+    test_features.cpp
 )
 
 target_link_libraries(BackupToolTests PRIVATE
@@ -19,6 +19,14 @@ target_link_libraries(BackupToolTests PRIVATE
 
 include(GoogleTest)
 gtest_discover_tests(BackupToolTests)
+
+# No session bus is reachable, so this test cannot touch a personal keyring.
+add_executable(CredentialUnavailableTest test_credential_unavailable.cpp)
+target_link_libraries(CredentialUnavailableTest PRIVATE dbackup_core GTest::gtest_main)
+add_test(NAME CredentialUnavailableTest
+    COMMAND ${CMAKE_COMMAND} -E env
+        DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/dbackup-test-bus
+        $<TARGET_FILE:CredentialUnavailableTest>)
 
 if(TARGET Qt6::Core)
     add_executable(BackupToolAutomationTests
@@ -35,6 +43,14 @@ if(TARGET Qt6::Core)
     set_target_properties(BackupToolAutomationTests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     gtest_discover_tests(BackupToolAutomationTests)
+endif()
+
+if(TARGET Qt6::Widgets)
+    add_executable(SourceDialogTest test_source_dialog.cpp)
+    target_include_directories(SourceDialogTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    target_link_libraries(SourceDialogTest PRIVATE Qt6::Widgets GTest::gtest)
+    add_test(NAME SourceDialogTest COMMAND ${CMAKE_COMMAND} -E env
+        QT_QPA_PLATFORM=offscreen $<TARGET_FILE:SourceDialogTest>)
 endif()
 
 if(DBACKUP_BUILD_TEST_CLI)

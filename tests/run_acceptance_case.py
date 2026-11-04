@@ -24,7 +24,7 @@ def ctest_pattern(case_id: str) -> str:
     if case_id.startswith("S3-REALTIME-"):
         return "^DirectoryWatcherTest\\."
     if case_id.startswith("S3-META-"):
-        return "^ArchiveV3Test\\.PreservesSafeRelativeSymbolicLinkAndSecurityDescriptor$"
+        return "^ArchiveV3Test\\.PreservesSafeRelativeSymbolicLink$"
     if case_id.startswith(("S4-", "S5-RESUME-")):
         return "^DBackupRemoteClientServerE2E$"
     if case_id.startswith("S5-INCR-"):

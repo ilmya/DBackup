@@ -10,7 +10,7 @@
 
 #include "automation/cron.h"
 #include "automation/directory_watcher.h"
-#include "repository/repository.h"
+#include "core/repository.h"
 
 namespace {
 std::string tempPath(const char *name) {
@@ -124,7 +124,7 @@ TEST(ArchiveV3Test, UsesAuthenticatedEncryptionAndSupportsCancellation) {
     
 }
 
-TEST(ArchiveV3Test, PreservesSafeRelativeSymbolicLinkAndSecurityDescriptor) {
+TEST(ArchiveV3Test, PreservesSafeRelativeSymbolicLink) {
     const std::string source=tempPath("link_source"),archive=tempPath("link.abk"),restore=tempPath("link_restore");std::filesystem::create_directory(source);writeText(source+"/target.txt","target");
     std::filesystem::create_symlink("target.txt", source + "/shortcut.txt");
     PackOptions options;std::string error;ASSERT_TRUE(ArchiveService::create(source,archive,options,error))<<error;std::vector<ArchiveEntry>entries;ASSERT_TRUE(ArchiveService::inspect(archive,entries,error))<<error;auto link=std::find_if(entries.begin(),entries.end(),[](const ArchiveEntry&e){return e.type==2;});ASSERT_NE(link,entries.end());EXPECT_EQ(link->linkTarget,"target.txt");EXPECT_NE(link->mode, 0u);

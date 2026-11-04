@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "core/operation.h"
-#include "archive/archive.h"
+#include "core/archive.h"
 
 struct SnapshotInfo {
     std::string id;

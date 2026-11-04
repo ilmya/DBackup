@@ -1,5 +1,5 @@
-#include "repository/repository.h"
-#include "archive/internal.h"
+#include "core/repository.h"
+#include "core/archive_internal.h"
 #include "core/crypto.h"
 
 #include <fcntl.h>
@@ -124,7 +124,7 @@ bool seal(const char *magic, const std::vector<uint8_t> &key, const std::vector<
 }
 bool unseal(const char *magic, const std::vector<uint8_t> &key, const std::vector<uint8_t> &stored,
             std::vector<uint8_t> &plain, std::string &error) {
-    if (stored.size() < 36 || std::memcmp(stored.data(), magic, 8)) { error = "文件格式无效或来自旧版本"; return false; }
+    if (stored.size() < 36 || std::memcmp(stored.data(), magic, 8)) { error = "文件格式无效"; return false; }
     std::vector<uint8_t> nonce(stored.begin() + 8, stored.begin() + 20);
     std::vector<uint8_t> tag(stored.begin() + 20, stored.begin() + 36);
     std::vector<uint8_t> cipher(stored.begin() + 36, stored.end());
@@ -195,7 +195,7 @@ bool LocalRepository::initialize(const std::string &password, std::string &error
     if (fs::exists(root / "config.bin", ec)) {
         std::vector<uint8_t> config;
         if (!readFile(root / "config.bin", config, error) || config.size() < 24 ||
-            std::memcmp(config.data(), configMagic, 8)) { error = "仓库配置无效或来自旧版本"; return false; }
+            std::memcmp(config.data(), configMagic, 8)) { error = "仓库配置无效"; return false; }
         std::vector<uint8_t> salt(config.begin() + 8, config.begin() + 24), key, plain;
         std::vector<uint8_t> sealed(config.begin() + 24, config.end());
         if (!keyFor(password, salt, key) || !unseal(configMagic, key, sealed, plain, error) ||
@@ -322,7 +322,7 @@ bool LocalRepository::listSnapshots(std::vector<SnapshotInfo> &snapshots, std::s
     std::vector<uint8_t> config;
     fs::path root(root_);
     if (!readFile(root / "config.bin", config, error) || config.size() < 24 ||
-        std::memcmp(config.data(), configMagic, 8)) { error = "仓库配置无效或来自旧版本"; return false; }
+        std::memcmp(config.data(), configMagic, 8)) { error = "仓库配置无效"; return false; }
     std::vector<std::string> ids;
     if (!manifests(root, ids, error)) return false;
     for (const auto &id : ids) {

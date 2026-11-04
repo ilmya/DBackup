@@ -1,6 +1,6 @@
 # DBackup Sprint 1–5 独立验收用例
 
-> 历史记录：以下内容针对旧 Windows 版本，保留供追溯；命令、平台特性与通过状态不代表 Linux 版本的当前结果。Linux 验证请参阅 [测试指南](testing-guide.md)。
+> 测试命令及当前结果分别见 [测试指南](testing-guide.md)和[功能验证](verification.md)。
 
 
 本文按课程要求设计测试，不以当前程序已经实现的功能为边界。尚未实现的功能也必须执行并如实记录为 `FAIL`、`BLOCKED` 或 `MANUAL`，不能从验收范围中删除。
@@ -11,7 +11,7 @@
 |---|---|
 | PASS | 实际结果满足全部成功判据 |
 | FAIL | 已执行，但至少一个可验证结果不符合要求 |
-| SKIP | 当前 Windows 版本或权限能力不支持，已记录原因 |
+| SKIP | 当前环境或权限能力不支持，已记录原因 |
 | BLOCKED | 环境、账号、第二台电脑或证书尚未准备 |
 | MANUAL | 必须通过 GUI、资源监视器、截图或人工观察判断 |
 | WARN | 主功能通过，但存在不阻塞本项的风险 |
@@ -35,37 +35,37 @@ Git commit：
 
 ```bash
 ./tests/acceptance.sh self-test
-./tests/acceptance.sh generate --root D:/DBackup-Acceptance
+./tests/acceptance.sh generate --root "$HOME/DBackup-Acceptance"
 ```
 
-默认生成到 `D:\DBackup-Acceptance`。没有 D 盘时必须显式指定安全目录：
+也可以显式指定其他隔离的 Linux 目录：
 
 ```bash
-./tests/acceptance.sh generate --root E:/DBackup-Acceptance
+./tests/acceptance.sh generate --root /tmp/DBackup-Acceptance
 ```
 
 基础恢复完成后执行独立比较：
 
 ```bash
 ./tests/acceptance.sh compare \
-  --source D:/DBackup-Acceptance/fixtures/normal \
-  --restored D:/DBackup-Acceptance/restore/normal \
-  --report D:/DBackup-Acceptance/reports/S1-PACK-001.md
+  --source "$HOME/DBackup-Acceptance/fixtures/normal" \
+  --restored "$HOME/DBackup-Acceptance/restore/normal" \
+  --report "$HOME/DBackup-Acceptance/reports/S1-PACK-001.md"
 ```
 
 增量仓库统计：
 
 ```bash
 ./tests/acceptance.sh inspect-repository \
-  --repository D:/DBackup-Acceptance/repositories/local \
-  --report D:/DBackup-Acceptance/reports/repository-baseline.md
+  --repository "$HOME/DBackup-Acceptance/repositories/local" \
+  --report "$HOME/DBackup-Acceptance/reports/repository-baseline.md"
 ```
 
 清理必须显式确认，且只接受带有效安全标记的测试根目录：
 
 ```bash
-./tests/acceptance.sh restore-permissions --root D:/DBackup-Acceptance
-./tests/acceptance.sh cleanup --root D:/DBackup-Acceptance --yes
+./tests/acceptance.sh restore-permissions --root "$HOME/DBackup-Acceptance"
+./tests/acceptance.sh cleanup --root "$HOME/DBackup-Acceptance" --yes
 ```
 
 测试密码统一使用 `DBackup-Acceptance-Only!2026`，禁止复用真实密码。
@@ -74,10 +74,10 @@ Git commit：
 
 | 编号 | 类型 | 前置条件与数据 | 操作步骤 | 预期结果与成功判据 | 实际结果 | 状态 | 证据 | 缺陷 |
 |---|---|---|---|---|---|---|---|---|
-| S1-PACK-001 | 自动+GUI | `fixtures\normal`，空恢复目录 | GUI 选择整个目录，生成 `.abk`，恢复到 `restore\normal`，运行 `compare` | 报告无 FAIL；路径、尺寸、SHA-256、空目录、mtime、属性、ACL 均满足规则 |  |  |  |  |
+| S1-PACK-001 | 自动+GUI | `fixtures/normal`，空恢复目录 | GUI 选择整个目录，生成 `.abk`，恢复到 `restore/normal`，运行 `compare` | 报告无 FAIL；路径、尺寸、SHA-256、空目录、mtime、权限和属主均满足规则 |  |  |  |  |
 | S1-PACK-002 | 自动+GUI | `empty.txt`、`one-byte.bin`、`empty-dir` | 分别作为来源备份和恢复 | 0 字节文件、1 字节文件、空目录都存在且类型正确 |  |  |  |  |
 | S1-PACK-003 | 自动+GUI | 中文、空格、Emoji、无扩展名、多点名称 | 多选这些文件后备份、恢复、比较 | 文件名不乱码、不被截断，SHA-256 一致 |  |  |  |  |
-| S1-PACK-004 | 自动+GUI | `nested\level1\level2` | 备份嵌套目录并恢复 | 完整保留相对目录层级，不写出恢复根目录 |  |  |  |  |
+| S1-PACK-004 | 自动+GUI | `nested/level1/level2` | 备份嵌套目录并恢复 | 完整保留相对目录层级，不写出恢复根目录 |  |  |  |  |
 | S1-PACK-005 | 自动+GUI | `before/exact/after-block.bin`、`multi-block.bin` | 一次多选文件备份恢复 | 4 MiB 边界前、等于、后及多块文件 SHA-256 一致 |  |  |  |  |
 | S1-PACK-006 | 自动+GUI | 两个内容相同、名称不同的文件 | 备份恢复 | 两个路径都存在且内容一致，不能错误合并为一个文件 |  |  |  |  |
 | S1-PACK-007 | 人工 | 两个不同目录中创建同名文件 | 同时添加两个来源并开始备份 | 软件明确保留根目录或拒绝冲突；不得静默覆盖 |  |  |  |  |
@@ -95,8 +95,8 @@ Git commit：
 
 | 编号 | 类型 | 前置条件与数据 | 操作步骤 | 预期结果与成功判据 | 实际结果 | 状态 | 证据 | 缺陷 |
 |---|---|---|---|---|---|---|---|---|
-| S2-COMP-001 | 自动+GUI | `compression\repeat-4m.bin` | 分别用不压缩、zlib 备份并比较归档大小，恢复后比较 | zlib 归档明显更小，两份恢复 SHA-256 一致 |  |  |  |  |
-| S2-COMP-002 | 自动+GUI | `compression\random-4m.bin` | 用 zlib 备份恢复 | 不应因数据不可压缩失败；恢复 SHA-256 一致 |  |  |  |  |
+| S2-COMP-001 | 自动+GUI | `compression/repeat-4m.bin` | 分别用不压缩、zlib 备份并比较归档大小，恢复后比较 | zlib 归档明显更小，两份恢复 SHA-256 一致 |  |  |  |  |
+| S2-COMP-002 | 自动+GUI | `compression/random-4m.bin` | 用 zlib 备份恢复 | 不应因数据不可压缩失败；恢复 SHA-256 一致 |  |  |  |  |
 | S2-COMP-003 | 人工 | 不同压缩等级 | 分别生成归档并记录时间、大小 | 所有等级均可恢复；等级选择真实生效 |  |  |  |  |
 | S2-CRYPT-001 | 自动+GUI | 已知明文文件，测试密码 | 加密备份，用正确密码恢复并比较 | 恢复通过；归档中不能直接检索到已知明文 |  |  |  |  |
 | S2-CRYPT-002 | 人工 | 加密归档 | 使用错误密码恢复 | 明确失败，不输出被视为成功的恢复结果 |  |  |  |  |
@@ -108,7 +108,7 @@ Git commit：
 | S2-FILTER-TIME-001 | 自动+GUI | 今天、3/10/40 天前文件 | 测试今天、最近 7 天、最近 30 天和自定义边界 | 边界包含规则明确，结果与文件时间一致 |  |  |  |  |
 | S2-FILTER-SIZE-001 | 自动+GUI | 1 KiB、1/5/10 MiB | 设置最小、最大及 B/KB/MB/GB 单位 | 边界文件包含正确，非法范围被拒绝 |  |  |  |  |
 | S2-FILTER-USER-001 | 自动+人工 | 当前用户文件 | 按当前用户筛选 | 当前用户文件被包含，预览与恢复一致 |  |  |  |  |
-| S2-FILTER-USER-002 | 人工 | 另一 Windows 用户拥有的测试文件 | 按当前用户和另一用户分别筛选 | 两类结果可区分；无第二用户时记 BLOCKED |  |  |  |  |
+| S2-FILTER-USER-002 | 人工 | 另一 Linux 用户拥有的测试文件 | 按当前用户和另一用户分别筛选 | 两类结果可区分；无第二用户时记 BLOCKED |  |  |  |  |
 | S2-FILTER-COMB-001 | 自动+GUI | 完整 `filters` | 组合路径、类型、名称、时间、尺寸、用户六项 | 六类按文档定义组合，预览与实际集合完全一致 |  |  |  |  |
 | S2-FILTER-INVALID-001 | 人工 | 无 | 输入非法日期、负尺寸、最小值大于最大值、未知规则 | GUI 在备份前拒绝并说明具体字段 |  |  |  |  |
 
@@ -117,20 +117,20 @@ Git commit：
 先执行：
 
 ```bash
-./tests/acceptance.sh prepare-links --root D:/DBackup-Acceptance
-./tests/acceptance.sh prepare-permissions --root D:/DBackup-Acceptance
+./tests/acceptance.sh prepare-links --root "$HOME/DBackup-Acceptance"
+./tests/acceptance.sh prepare-permissions --root "$HOME/DBackup-Acceptance"
 ```
 
 如返回 3，应在开发者模式或管理员终端重试；仍不可用则记录 `BLOCKED/SKIP`。
 
 | 编号 | 类型 | 前置条件与数据 | 操作步骤 | 预期结果与成功判据 | 实际结果 | 状态 | 证据 | 缺陷 |
 |---|---|---|---|---|---|---|---|---|
-| S3-META-001 | 自动+GUI | `fixtures\permissions`，自定义 ACL | 备份，恢复到支持 NTFS ACL 的目录，运行 `compare` | owner/group/DACL、属性、mtime 按规则恢复；权限不足须明确报告 |  |  |  |  |
+| S3-META-001 | 自动+GUI | `fixtures/permissions` | 备份，恢复到 Linux 原生文件系统，运行 `compare` | UID/GID、权限和 mtime 按规则恢复；权限不足须明确报告 |  |  |  |  |
 | S3-META-002 | 自动+GUI | 相对文件符号链接 | 备份恢复，运行链接清单比较 | 不跟随重复打包；恢复后仍是相对链接且目标一致 |  |  |  |  |
-| S3-META-003 | 自动+GUI | 目录符号链接和 Junction | 备份恢复 | 不递归循环；条目类型和目标可识别，恢复行为明确 |  |  |  |  |
+| S3-META-003 | 人工 | 目录符号链接 | 备份恢复 | 不递归循环；条目类型和目标可识别，恢复行为明确 |  |  |  |  |
 | S3-META-004 | 人工 | `dangerous-absolute.txt` | 尝试恢复到隔离目录 | 默认拒绝绝对/逃逸链接，不能写出恢复根目录 |  |  |  |  |
 | S3-META-005 | 人工 | `hold-pipe` 在另一终端运行 | 尝试选择或扫描活动命名管道 | 明确拒绝/跳过并记录原因，不能生成普通伪文件或崩溃 |  |  |  |  |
-| S3-META-006 | 人工 | Windows 设备路径测试 | 尝试添加设备对象 | 明确拒绝，程序保持可用；不要求创建危险设备样本 |  |  |  |  |
+| S3-META-006 | 人工 | Linux 设备路径测试 | 尝试添加设备对象 | 明确拒绝，程序保持可用；不要求创建危险设备样本 |  |  |  |  |
 | S3-CRON-001 | 人工 | 创建下一分钟执行任务 | 保持程序运行等待触发 | 到时只执行一次，记录开始、结束和结果 |  |  |  |  |
 | S3-CRON-002 | 人工 | 每日、每周、每月及高级 Cron | 查看下次执行时间 | 下次时间符合表达式，非法 Cron 被拒绝 |  |  |  |  |
 | S3-CRON-003 | 人工 | 保留数量 3 | 连续产生 5 个成功快照 | 最终保留最近 3 个成功版本，均可恢复 |  |  |  |  |
@@ -139,15 +139,15 @@ Git commit：
 | S3-CRON-006 | 人工 | 同一任务执行时间超过调度周期 | 等待再次到期 | 不并发重复运行同一任务，或明确排队 |  |  |  |  |
 | S3-CRON-007 | 自动 | JobManager 注入固定本地时钟，Cron=`* * * * *` | 将时钟推进到下次执行分钟，调用一次计划检查，再重复检查 | 到期任务仅启动一次；下次运行时间推进到下一分钟 |  |  |  |  |
 | S3-CRON-008 | 自动 | JobManager 执行器保持任务运行 | 对同一任务连续调用“立即运行”，完成后删除任务并报告完成 | 重复请求最多排队一次；已删除任务不会产生孤立重跑 |  |  |  |  |
-| S3-REALTIME-001 | 人工 | 监控 `fixtures\realtime` | 分别创建、修改、重命名、删除文件 | 每类事件最终反映到新快照，恢复后状态正确 |  |  |  |  |
+| S3-REALTIME-001 | 人工 | 监控 `fixtures/realtime` | 分别创建、修改、重命名、删除文件 | 每类事件最终反映到新快照，恢复后状态正确 |  |  |  |  |
 | S3-REALTIME-002 | 人工 | 同一文件快速保存 10 次 | 在 3 秒内连续写入 | 事件被合并，不产生 10 个快照；最终内容正确 |  |  |  |  |
 | S3-REALTIME-003 | 人工 | 持续变化超过 30 秒 | 每秒修改一次 | 最长等待到达后仍会执行，不无限推迟 |  |  |  |  |
 | S3-REALTIME-004 | 人工 | 仓库位于监控来源内 | 触发一次备份并观察 | 仓库写入不再次触发无限备份循环 |  |  |  |  |
 | S3-REALTIME-005 | 人工 | 大量批量复制/重命名 | 制造通知缓冲区压力 | 溢出后完整重扫，最终快照与来源一致 |  |  |  |  |
 | S3-REALTIME-006 | 人工 | 正在监控的目录 | 删除/移动目录，再重新创建 | 进入错误状态并定期重试，恢复后继续监控 |  |  |  |  |
-| S3-REALTIME-007 | 自动 | Windows 临时目录、目录监视器状态回调 | 开始监控后移动监控根目录，确认不可用状态，再以原路径重建目录 | 监视器自动重新打开目录并发出完整重扫请求 |  |  |  |  |
+| S3-REALTIME-007 | 自动 | Linux 临时目录、目录监视器状态回调 | 开始监控后移动监控根目录，确认不可用状态，再以原路径重建目录 | 监视器自动重新打开目录并发出完整重扫请求 |  |  |  |  |
 | S3-TRAY-001 | 人工 | 已启用自动任务 | 关闭主窗口、托盘暂停/继续、显式退出 | 关闭仅隐藏；暂停不触发；继续恢复；退出才终止进程 |  |  |  |  |
-| S3-STARTUP-001 | 人工 | 开启登录启动 | 注销并重新登录 Windows | 程序自动进入可用后台状态，路径和参数正确 |  |  |  |  |
+| S3-STARTUP-001 | 人工 | 开启登录启动 | 注销并重新登录桌面会话 | 程序自动进入可用后台状态，路径和参数正确 |  |  |  |  |
 
 ## 6. Sprint 4：网络 C/S 原型
 
@@ -161,7 +161,7 @@ Git commit：
 | S4-AUTH-002 | 自动/人工 | Alice Token | 注销后再次访问，另测试过期 Token | 注销和过期 Token 都返回 401 |  |  |  |  |
 | S4-AUTH-003 | 自动/人工 | Alice、Bob | Alice 上传块/快照，Bob 查询相同 ID | Bob 不可探测或读取 Alice 数据 |  |  |  |  |
 | S4-AUTH-004 | 人工 | 重复错误登录 | 高频提交错误密码 | 服务不崩溃；记录是否存在限速/锁定，未实现则如实 FAIL |  |  |  |  |
-| S4-REMOTE-001 | GUI+网络 | `fixtures\network\alice` | GUI 登录、选择远程仓库、执行备份 | 数据通过 HTTPS 到服务端，GUI 显示完成，服务器产生用户快照 |  |  |  |  |
+| S4-REMOTE-001 | GUI+网络 | `fixtures/network/alice` | GUI 登录、选择远程仓库、执行备份 | 数据通过 HTTPS 到服务端，GUI 显示完成，服务器产生用户快照 |  |  |  |  |
 | S4-REMOTE-002 | GUI+网络 | 已有远程快照 | 在历史页列出、查看详情、恢复并比较 | 远程历史准确，恢复结果报告无 FAIL |  |  |  |  |
 | S4-REMOTE-003 | GUI+网络 | 两个远程快照 | 删除一个快照，重启服务器再查询 | 删除持久化；仍被引用的块保留，无引用块回收 |  |  |  |  |
 | S4-REMOTE-004 | 人工 | 超限块、非法哈希、超大清单、非法 JSON | 调用相应 API | 返回 4xx，不崩溃、不污染数据库或块目录 |  |  |  |  |
@@ -174,7 +174,7 @@ Git commit：
 
 | 编号 | 类型 | 前置条件与数据 | 操作步骤 | 预期结果与成功判据 | 实际结果 | 状态 | 证据 | 缺陷 |
 |---|---|---|---|---|---|---|---|---|
-| S5-INCR-001 | 自动+GUI | `fixtures\incremental` 初始数据 | 创建首个本地快照并保存仓库统计 | 快照可见并可恢复，结果与初始来源清单一致 |  |  |  |  |
+| S5-INCR-001 | 自动+GUI | `fixtures/incremental` 初始数据 | 创建首个本地快照并保存仓库统计 | 快照可见并可恢复，结果与初始来源清单一致 |  |  |  |  |
 | S5-INCR-002 | 自动+GUI | 来源不变 | 创建第二快照并与基线统计比较 | 不新增数据块或新增量为零；两个版本均可恢复 |  |  |  |  |
 | S5-INCR-003 | 自动+GUI | 执行 `mutate --version 2` | 创建快照，统计新增块，恢复快照 1/2 | 只增加变化相关块；两个快照分别与对应清单一致 |  |  |  |  |
 | S5-INCR-004 | 自动+GUI | 执行 `mutate --version 3` | 创建快照并恢复 | 首块/尾块、mtime-only、attribute-only 变化均正确处理 |  |  |  |  |
@@ -193,18 +193,18 @@ Git commit：
 
 | 编号 | 类型 | 前置条件与数据 | 操作步骤 | 预期结果与成功判据 | 实际结果 | 状态 | 证据 | 缺陷 |
 |---|---|---|---|---|---|---|---|---|
-| ROBUST-001 | 人工 | `fixtures\permissions` 已启用拒绝读取 | 执行正常归档和增量备份 | 明确报告无法读取，不静默成功，不崩溃 |  |  |  |  |
+| ROBUST-001 | 人工 | `fixtures/permissions` 已启用拒绝读取 | 执行正常归档和增量备份 | 明确报告无法读取，不静默成功，不崩溃 |  |  |  |  |
 | ROBUST-002 | 人工 | 文件被另一进程独占 | 备份过程中保持独占锁 | 明确失败/重试策略，不产生错误成功结果 |  |  |  |  |
 | ROBUST-003 | 人工 | 大文件持续被修改 | 备份期间循环写入 | 行为有定义；报告不一致或创建一致快照，不静默混合版本 |  |  |  |  |
 | ROBUST-004 | 人工 | 空间受限的测试磁盘/VHD | 备份直到空间不足 | 失败可理解，已有有效归档/快照不损坏 |  |  |  |  |
 | ROBUST-005 | 人工 | 可安全移除的测试盘 | 写入期间安全模拟断开 | 程序不崩溃；事务/临时文件策略有效 |  |  |  |  |
 | ROBUST-006 | 人工 | 同一来源启动两个任务 | 同时运行手动、定时或实时任务 | 有互斥/排队策略，不互相破坏仓库 |  |  |  |  |
 | ROBUST-007 | 人工 | stress 数据 | 连续备份恢复 20 次并观察句柄/内存 | 无持续明显泄漏、死锁或句柄耗尽 |  |  |  |  |
-| REL-001 | 自动 | Qt 开发电脑 | 执行 `build.bat test` | Release 客户端、服务器构建成功；测试无失败 |  |  |  |  |
-| REL-002 | 自动 | Qt 开发电脑 | 执行 `build.bat package`，检查 ZIP | ZIP 含两个 EXE、Qt、SQLite、TLS/OpenSSL 依赖 |  |  |  |  |
-| REL-003 | 两台电脑 | 无 Qt/MinGW/OpenSSL/Python 的干净 Windows | 解压 ZIP，启动 GUI 和服务器，执行基础往返 | 不缺 DLL；GUI、SQLite、TLS 和基础备份恢复正常 |  |  |  |  |
+| REL-001 | 自动 | Linux Qt 开发环境 | 执行 `bash build.sh test` | Release 客户端、服务器构建成功；测试无失败 |  |  |  |  |
+| REL-002 | 人工 | Linux 发布环境 | 检查发布包方案 | 当前尚未提供独立发布包，记录为未实现 |  |  |  |  |
+| REL-003 | 两台电脑 | 另一台 Linux 电脑 | 安装依赖，启动 GUI 和服务器，执行基础往返 | GUI、SQLite、TLS 和基础备份恢复正常 |  |  |  |  |
 | REL-004 | 人工 | 路径含中文、空格和较长目录 | 从该路径运行便携包并备份恢复 | 程序、插件、配置和数据路径均正常 |  |  |  |  |
-| REL-005 | 人工 | Windows 10 和 Windows 11 | 分别执行基础、托盘、实时、TLS 测试 | 两个受支持系统表现符合要求 |  |  |  |  |
+| REL-005 | 人工 | 不同 Linux 桌面环境 | 分别执行基础、托盘、实时、TLS 测试 | 实际结果与环境限制均有记录 |  |  |  |  |
 
 ## 9. 推荐执行顺序
 
@@ -223,11 +223,11 @@ Git commit：
 
 ## 10. 测试结束
 
-先恢复测试 ACL，再执行安全清理：
+先恢复测试文件权限，再执行安全清理：
 
 ```bat
-./tests/acceptance.sh restore-permissions --root D:/DBackup-Acceptance
-./tests/acceptance.sh cleanup --root D:/DBackup-Acceptance --yes
+./tests/acceptance.sh restore-permissions --root "$HOME/DBackup-Acceptance"
+./tests/acceptance.sh cleanup --root "$HOME/DBackup-Acceptance" --yes
 ```
 
 正式提交前，将已填写的用例文档复制为一次验收记录，并保留 `reports`、截图、日志和使用的 Git commit；不要把测试密码、真实 Token、真实私钥或用户隐私数据提交到仓库。

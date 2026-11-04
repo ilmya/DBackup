@@ -1,8 +1,8 @@
-#include "archive/archive.h"
+#include "core/archive.h"
 #include "network/remote_client.h"
 #include "network/remote_repository_service.h"
-#include "repository/repository.h"
-#include "security/credential_store.h"
+#include "core/repository.h"
+#include "core/credential_store.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>

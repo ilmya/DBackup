@@ -38,9 +38,10 @@
 #include <QVBoxLayout>
 
 #include "gui/filter_dialog.h"
+#include "gui/source_dialog.h"
 #include "automation/job_manager.h"
-#include "repository/repository.h"
-#include "security/credential_store.h"
+#include "core/repository.h"
+#include "core/credential_store.h"
 #include "network/remote_client.h"
 #include "network/remote_repository_service.h"
 
@@ -292,9 +293,10 @@ QWidget *MainWindow::createSettingsPage() {
 }
 
 void MainWindow::addSources(bool directory) {
-    QStringList paths;
-    if (directory) { const QString path = QFileDialog::getExistingDirectory(this, tr("选择备份文件夹")); if (!path.isEmpty()) paths << path; }
-    else paths = QFileDialog::getOpenFileNames(this, tr("选择一个或多个备份文件"));
+    QFileDialog dialog(this, directory ? tr("选择备份文件夹") : tr("选择一个或多个备份文件"));
+    configureSourceDialog(dialog, directory);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const QStringList paths = dialog.selectedFiles();
     for (const QString &path : paths) {
         bool exists = false; for (int i = 0; i < sourceList_->count(); ++i) if (sourceList_->item(i)->data(Qt::UserRole).toString() == path) exists = true;
         if (!exists) { auto *item = new QListWidgetItem((QFileInfo(path).isDir() ? tr("文件夹  ") : tr("文件  ")) + path); item->setData(Qt::UserRole, path); sourceList_->addItem(item); }

@@ -209,7 +209,6 @@ def generate_fixtures(root: Path, profile: str, reset: bool) -> None:
     permissions = root / "fixtures/permissions"
     (permissions / "denied-read.txt").write_text("permission failure fixture", encoding="utf-8")
     (permissions / "readonly.txt").write_text("read only", encoding="utf-8")
-    (permissions / "no-inheritance.txt").write_text("custom ACL", encoding="utf-8")
     set_attributes(permissions / "readonly.txt", READONLY_MARKER)
 
     incremental = root / "fixtures/incremental"
@@ -245,10 +244,6 @@ def generate_fixtures(root: Path, profile: str, reset: bool) -> None:
 def get_attributes(path: Path) -> int:
     return stat.S_IMODE(path.lstat().st_mode)
 
-
-def get_sddl(path: Path) -> str:
-    info = path.lstat()
-    return f"{info.st_uid}:{info.st_gid}"
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -288,13 +283,13 @@ def build_manifest(base: Path) -> dict:
                 entries.append({"path": relative, "kind": "unreadable", "error": str(exc)})
                 continue
             entry = {"path": relative, "kind": kind, "mtimeNs": info.st_mtime_ns,
-                     "attributes": attrs, "sddl": get_sddl(path)}
+                     "attributes": attrs, "uid": info.st_uid, "gid": info.st_gid}
             if kind == "file":
                 try:
                     entry.update(size=info.st_size, sha256=sha256_file(path))
                 except OSError as exc:
                     entry.update(kind="unreadable", error=str(exc), size=info.st_size)
-            elif kind in ("symlink", "junction", "reparse"):
+            elif kind == "symlink":
                 try:
                     entry["target"] = os.readlink(path)
                 except OSError as exc:
@@ -304,7 +299,7 @@ def build_manifest(base: Path) -> dict:
                 stack.append(path)
             entries.append(entry)
     entries.sort(key=lambda item: item["path"].casefold())
-    return {"schema": 1, "toolVersion": TOOL_VERSION, "base": str(base),
+    return {"schema": 2, "toolVersion": TOOL_VERSION, "base": str(base),
             "generatedAt": now_iso(), "host": socket.gethostname(), "user": getpass.getuser(),
             "platform": platform.platform(), "entries": entries}
 
@@ -327,7 +322,7 @@ def build_source_manifest(sources: list[str]) -> dict:
             if path in combined:
                 raise ValueError(f"多个来源恢复为相同路径: {path}")
             combined[path] = entry
-    return {"schema": 1, "toolVersion": TOOL_VERSION,
+    return {"schema": 2, "toolVersion": TOOL_VERSION,
             "base": [str(path) for path in resolved], "generatedAt": now_iso(),
             "host": socket.gethostname(), "user": getpass.getuser(),
             "platform": platform.platform(),
@@ -344,6 +339,8 @@ def markdown_escape(value: object) -> str:
 
 
 def compare_manifests(source: dict, restored: dict, tolerance_ns: int) -> list[dict]:
+    if source.get("schema") != 2 or restored.get("schema") != 2:
+        raise ValueError("验收清单格式无效，请重新生成清单")
     left = {entry["path"]: entry for entry in source["entries"]}
     right = {entry["path"]: entry for entry in restored["entries"]}
     results: list[dict] = []
@@ -370,7 +367,7 @@ def compare_manifests(source: dict, restored: dict, tolerance_ns: int) -> list[d
                 f"{a.get('sha256')} / {b.get('sha256')}")
         if a["kind"] == "directory" and a.get("empty"):
             add("PASS" if b.get("empty") else "FAIL", "Empty directory", path, "空目录应被保留")
-        if a["kind"] in ("symlink", "junction", "reparse"):
+        if a["kind"] == "symlink":
             add("PASS" if a.get("target") == b.get("target") else "FAIL", "Link", path,
                 f"{a.get('target')} / {b.get('target')}")
         difference = abs(int(a.get("mtimeNs", 0)) - int(b.get("mtimeNs", 0)))
@@ -378,11 +375,12 @@ def compare_manifests(source: dict, restored: dict, tolerance_ns: int) -> list[d
             f"差值 {difference / 1_000_000_000:.6f} 秒")
         add("PASS" if a.get("attributes") == b.get("attributes") else "FAIL", "Attributes", path,
             f"0x{a.get('attributes', 0):X} / 0x{b.get('attributes', 0):X}")
-        if a.get("sddl") is None or b.get("sddl") is None:
-            add("SKIP", "ACL", path, "无法读取一侧属主信息")
+        if any(entry.get(key) is None for entry in (a, b) for key in ("uid", "gid")):
+            add("SKIP", "Ownership", path, "无法读取一侧属主信息")
         else:
-            add("PASS" if a["sddl"] == b["sddl"] else "FAIL", "ACL", path,
-                "UID/GID 一致" if a["sddl"] == b["sddl"] else "UID/GID 不同")
+            ownership_matches = (a["uid"], a["gid"]) == (b["uid"], b["gid"])
+            add("PASS" if ownership_matches else "FAIL", "Ownership", path,
+                "UID/GID 一致" if ownership_matches else "UID/GID 不同")
     return results
 
 

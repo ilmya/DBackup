@@ -1,4 +1,4 @@
-#include "repository/repository.h"
+#include "core/repository.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
@@ -33,6 +33,30 @@ TEST(LinuxRepository, SnapshotsDeduplicateRestoreAndPrune) {
     std::ifstream input(base / "restored/source/a.txt");
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}), "hello");
     EXPECT_FALSE(repository.initialize("wrong", error));
+    fs::remove_all(base);
+}
+
+TEST(LinuxRepository, DeletingSnapshotPreservesOtherSnapshot) {
+    char name[] = "/tmp/dbackup-repository-test-XXXXXX";
+    const char *root = mkdtemp(name);
+    ASSERT_NE(root, nullptr);
+    fs::path base(root);
+    fs::create_directory(base / "source");
+    std::ofstream(base / "source/a.txt") << "shared content";
+    LocalRepository repository((base / "repository").string());
+    SnapshotOptions options; options.sources = {(base / "source").string()}; options.password = "secret";
+    SnapshotInfo first, second;
+    std::string error;
+    ASSERT_TRUE(repository.createSnapshot(options, first, error)) << error;
+    ASSERT_TRUE(repository.createSnapshot(options, second, error)) << error;
+    ASSERT_TRUE(repository.deleteSnapshot(first.id, error)) << error;
+    std::vector<SnapshotInfo> snapshots;
+    ASSERT_TRUE(repository.listSnapshots(snapshots, error)) << error;
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].id, second.id);
+    ASSERT_TRUE(repository.restoreSnapshot(second.id, (base / "restored").string(), "secret", error)) << error;
+    std::ifstream input(base / "restored/source/a.txt");
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}), "shared content");
     fs::remove_all(base);
 }
 

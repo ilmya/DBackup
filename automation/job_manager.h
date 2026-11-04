@@ -8,7 +8,7 @@
 #include <map>
 #include <memory>
 #include "automation/directory_watcher.h"
-#include "archive/archive.h"
+#include "core/archive.h"
 
 struct BackupJob {
     QString id, name, destination, cron;
