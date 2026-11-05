@@ -17,8 +17,9 @@
 namespace {
 namespace fs = std::filesystem;
 using dbackup::archive_format::Entry;
-constexpr char configMagic[] = "DBRL0001";
+constexpr char configMagic[] = "DBRL0002";
 constexpr char chunkMagic[] = "DBCL0001";
+constexpr char warningsMagic[] = "DBWL0001";
 
 class RepositoryLock {
 public:
@@ -229,6 +230,10 @@ bool LocalRepository::initialize(const std::string &password, std::string &error
 bool LocalRepository::createSnapshot(const SnapshotOptions &options, SnapshotInfo &snapshot,
                                      std::string &error, const OperationContext &context) {
     error.clear(); snapshot = {};
+    std::vector<std::string> localWarnings;
+    OperationContext scanContext = context;
+    if (!scanContext.warnings) scanContext.warnings = &localWarnings;
+    const size_t warningStart = scanContext.warnings->size();
     if (options.chunkSize == 0 || options.chunkSize > 64u * 1024u * 1024u) { error = "数据块大小无效"; return false; }
     if (!initialize(options.password, error)) return false;
     RepositoryLock lock(root_, true, error);
@@ -243,7 +248,9 @@ bool LocalRepository::createSnapshot(const SnapshotOptions &options, SnapshotInf
         if (path == root || inside(root, path) || inside(path, root)) { error = "备份来源与仓库不能互相包含"; return false; }
     }
     std::vector<dbackup::archive_scan::Entry> scanned;
-    if (!dbackup::archive_scan::collect(options.sources, {}, options.filter, scanned, nullptr, context, error, true)) return false;
+    OperationProgress progress;progress.stage=OperationStage::Scanning;context.report(progress);
+    if (!dbackup::archive_scan::collect(options.sources, {}, options.filter, scanned, nullptr, scanContext, error, true)) return false;
+    progress.stage=OperationStage::Reading;progress.totalFiles=scanned.size();
     std::vector<uint8_t> key;
     if (!keyFor(options.password, salt_, key)) { error = "密钥派生失败"; return false; }
     std::vector<Entry> entries;
@@ -255,12 +262,18 @@ bool LocalRepository::createSnapshot(const SnapshotOptions &options, SnapshotInf
     std::vector<uint8_t> random;
     if (!dbackup::crypto::randomBytes(random, 8)) { error = "无法生成快照标识"; return false; }
     snapshot.id = std::to_string(snapshot.createdAtMs) + "-" + hex(random);
+    std::set<std::string> availableFiles;
     for (auto &item : scanned) {
         if (context.isCancelled()) { error = "操作已取消"; return false; }
+        progress.currentPath=item.source.string();++progress.completedFiles;context.report(progress);
         Entry entry; entry.file = std::move(item);
         if (entry.file.type == 0) {
             int fd = open(entry.file.source.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-            if (fd < 0) { error = "无法读取来源: " + entry.file.source.string(); return false; }
+            if (fd < 0) {
+                error = "无法读取来源: " + entry.file.source.string() + ": " + std::strerror(errno);
+                if (errno == EACCES || errno == EPERM) { scanContext.warn(error); error.clear(); continue; }
+                return false;
+            }
             struct stat before{};
             if (fstat(fd, &before) || !S_ISREG(before.st_mode) || uint64_t(before.st_dev) != entry.file.metadata.device ||
                 uint64_t(before.st_ino) != entry.file.metadata.inode || uint64_t(before.st_size) != entry.file.metadata.size ||
@@ -305,13 +318,35 @@ bool LocalRepository::createSnapshot(const SnapshotOptions &options, SnapshotInf
             close(fd);
             if (!unchanged) { error = "备份期间文件已改变"; return false; }
             ++snapshot.fileCount;
+            availableFiles.insert(entry.file.relativePath);
+        }
+        if (entry.file.type == 3 && !availableFiles.count(entry.file.linkTarget)) {
+            scanContext.warn(entry.file.relativePath + ": 硬链接目标未能备份"); continue;
         }
         entries.push_back(std::move(entry));
     }
     if (context.isCancelled()) { error = "操作已取消"; return false; }
+    snapshot.warnings.assign(scanContext.warnings->begin() + warningStart, scanContext.warnings->end());
+    snapshot.partial = !snapshot.warnings.empty();
+    if (entries.empty() && snapshot.partial) {
+        error = "没有可备份的内容";
+        for (const auto &warning : snapshot.warnings) error += "\n" + warning;
+        return false;
+    }
+    const fs::path warningPath = root / "snapshots" / (snapshot.id + ".warnings");
+    if (snapshot.partial) {
+        std::string text;
+        for (const auto &warning : snapshot.warnings) { if (!text.empty()) text += "\n"; text += warning; }
+        std::vector<uint8_t> plain(text.begin(), text.end()), stored;
+        if (!seal(warningsMagic, key, plain, stored, error) || !writeAtomic(warningPath, stored, false, error)) return false;
+    }
     std::vector<uint8_t> manifest;
     if (!dbackup::archive_format::encode(entries, 6, options.password, manifest, error) ||
-        !writeAtomic(root / "snapshots" / (snapshot.id + ".manifest"), manifest, false, error)) return false;
+        !writeAtomic(root / "snapshots" / (snapshot.id + ".manifest"), manifest, false, error)) {
+        if (snapshot.partial) { std::error_code ignored; fs::remove(warningPath, ignored); }
+        return false;
+    }
+    for (const auto &warning : snapshot.warnings) { if (!error.empty()) error += "\n"; error += warning; }
     return true;
 }
 
@@ -329,7 +364,16 @@ bool LocalRepository::listSnapshots(std::vector<SnapshotInfo> &snapshots, std::s
         SnapshotInfo snapshot;
         snapshot.id = id;
         snapshot.createdAtMs = std::stoll(id.substr(0, 13));
+        const auto warningPath = root / "snapshots" / (id + ".warnings");
+        std::error_code warningError;
+        snapshot.partial = fs::exists(warningPath, warningError);
+        if (warningError) { error = "无法读取快照状态: " + warningError.message(); return false; }
         if (!activePassword_.empty()) {
+            if (snapshot.partial) {
+                std::vector<uint8_t> stored, plain, key;
+                if (!keyFor(activePassword_, salt_, key) || !readFile(warningPath, stored, error) || !unseal(warningsMagic, key, stored, plain, error)) return false;
+                snapshot.warnings.emplace_back(plain.begin(), plain.end());
+            }
             std::vector<Entry> entries;
             if (!loadManifest(root, id, activePassword_, entries, error)) return false;
             for (const auto &entry : entries) {
@@ -387,7 +431,9 @@ bool LocalRepository::deleteSnapshot(const std::string &id, std::string &error) 
     int fd = dbackup::linux_file::openDirectory(fs::path(root_) / "snapshots", false, error);
     if (fd < 0) return false;
     int result = unlinkat(fd, (id + ".manifest").c_str(), 0);
-    int saved = errno; close(fd);
+    int saved = errno;
+    if (result == 0) unlinkat(fd, (id + ".warnings").c_str(), 0);
+    close(fd);
     if (result != 0) { error = "快照不存在或无法删除: " + std::string(std::strerror(saved)); return false; }
     return true;
 }
@@ -421,6 +467,7 @@ bool LocalRepository::prune(size_t keep, std::string &error) {
         if (unlinkat(snapshotsFd, (ids[i] + ".manifest").c_str(), 0) != 0) {
             close(snapshotsFd); error = "无法删除快照: " + ids[i]; return false;
         }
+        unlinkat(snapshotsFd, (ids[i] + ".warnings").c_str(), 0);
     }
     close(snapshotsFd);
     std::error_code ec;

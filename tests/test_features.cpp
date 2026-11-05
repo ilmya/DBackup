@@ -16,7 +16,7 @@ namespace {
 std::string tempPath(const char *name) {
     struct TempRoot {
         std::filesystem::path path;
-        TempRoot() { char value[] = "/tmp/dbackup-s345-XXXXXX"; char *result = mkdtemp(value); if (result) path = result; }
+        TempRoot() { std::string value = (std::filesystem::temp_directory_path() / "dbackup-features-XXXXXX").string(); char *result = mkdtemp(value.data()); if (result) path = result; }
         ~TempRoot() { if (!path.empty()) std::filesystem::remove_all(path); }
     };
     static TempRoot root;
@@ -116,7 +116,7 @@ TEST(ArchiveV3Test, UsesAuthenticatedEncryptionAndSupportsCancellation) {
     PackOptions options; options.password="correct"; std::string error;
     ASSERT_TRUE(ArchiveService::create(source,archive,options,error))<<error;
     std::ifstream input(archive,std::ios::binary); std::vector<unsigned char> bytes{std::istreambuf_iterator<char>(input),{}};
-    ASSERT_GT(bytes.size(),50u); EXPECT_EQ(std::string(bytes.begin(), bytes.begin()+8), "DBLIN001");
+    ASSERT_GT(bytes.size(),50u); EXPECT_EQ(std::string(bytes.begin(), bytes.begin()+8), "DBPK0001");
     bytes.back()^=0x01; std::ofstream changed(archive,std::ios::binary|std::ios::trunc); changed.write(reinterpret_cast<char*>(bytes.data()),bytes.size()); changed.close();
     EXPECT_FALSE(ArchiveService::extract(archive,restore,error,"correct"));
     std::atomic_bool cancelled{true}; OperationContext context; context.cancelled=&cancelled;

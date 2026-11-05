@@ -2,14 +2,15 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
 
 TEST(LinuxScan, PreservesLinksAndAppliesFileFilter) {
-    char name[] = "/tmp/dbackup-scan-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-scan-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root);
     fs::create_directory(base / "dir");
@@ -38,17 +39,37 @@ TEST(LinuxScan, PreservesLinksAndAppliesFileFilter) {
     fs::remove_all(base);
 }
 
-TEST(LinuxScan, RefusesSpecialFilesAndHonorsCancellation) {
-    char name[] = "/tmp/dbackup-scan-test-XXXXXX";
-    const char *root = mkdtemp(name);
+TEST(LinuxScan, HonorsCancellation) {
+    std::string name = (fs::temp_directory_path() / "dbackup-scan-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
-    fs::path fifo = fs::path(root) / "pipe";
-    ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0);
+    std::ofstream(fs::path(root) / "item") << "data";
     std::vector<dbackup::archive_scan::Entry> entries;
     std::string error;
-    EXPECT_FALSE(dbackup::archive_scan::collect({root}, {}, {}, entries, nullptr, {}, error));
     std::atomic_bool cancelled{true};
     OperationContext context; context.cancelled = &cancelled;
-    EXPECT_FALSE(dbackup::archive_scan::collect({fifo.string()}, {}, {}, entries, nullptr, context, error));
+    EXPECT_FALSE(dbackup::archive_scan::collect({root}, {}, {}, entries, nullptr, context, error));
     fs::remove_all(root);
+}
+
+TEST(LinuxScan, NestedSelectionExcludesAndReincludesWithNewFiles) {
+    std::string name = (fs::temp_directory_path() / "dbackup-selection-XXXXXX").string();
+    const char *root = mkdtemp(name.data()); ASSERT_NE(root, nullptr);
+    const fs::path base(root), source = base / "source";
+    fs::create_directories(source / "excluded/selected");
+    std::ofstream(source / "new.txt") << "new";
+    std::ofstream(source / "excluded/hidden.txt") << "hidden";
+    std::ofstream(source / "excluded/selected/keep.txt") << "keep";
+    FilterOptions filter;
+    filter.sourceRules = {{source.string(), true}, {(source / "excluded").string(), false},
+                          {(source / "excluded/selected").string(), true}};
+    std::vector<dbackup::archive_scan::Entry> entries;
+    BackupPreview preview; std::string error;
+    ASSERT_TRUE(dbackup::archive_scan::collect({source.string()}, {}, filter, entries, &preview, {}, error)) << error;
+    std::set<std::string> paths; for (const auto &entry : entries) paths.insert(entry.relativePath);
+    EXPECT_TRUE(paths.count("new.txt"));
+    EXPECT_FALSE(paths.count("excluded/hidden.txt"));
+    EXPECT_TRUE(paths.count("excluded/selected/keep.txt"));
+    EXPECT_EQ(preview.includedFiles, 2u);
+    fs::remove_all(base);
 }

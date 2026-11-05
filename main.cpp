@@ -6,6 +6,7 @@
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+    app.setQuitOnLastWindowClosed(false);
     QCoreApplication::setOrganizationName("DBackup Team");
     QCoreApplication::setApplicationName("DBackup");
     QCoreApplication::setApplicationVersion("1.0.0");

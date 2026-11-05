@@ -2,7 +2,7 @@
 
 Ubuntu 22.04 WSL 2 可运行 Linux 构建；WSLg 将 Qt 应用显示为 Windows 桌面上的独立窗口。程序访问 WSL 文件系统。
 
-在 Ubuntu 安装 CMake、Ninja、GCC、Python、OpenSSL、zlib 和 libsecret 开发库；Qt 需要 6.5+ 的 Linux GCC 套件以及 HTTP Server、WebSockets。Ubuntu 22.04 软件源中的 Qt 版本可能不足，应另行安装。开发机 Qt 路径为 `/home/ilm/Qt/6.8.3/gcc_64`。
+在 Ubuntu 安装 CMake、Ninja、GCC、Python、OpenSSL、zlib 和 libsecret 开发库；Qt 需要 6.5+ 的 Linux GCC Widgets 套件。Ubuntu 22.04 软件源中的 Qt 版本可能不足，应另行安装。开发机 Qt 路径为 `/home/ilm/Qt/6.8.3/gcc_64`。
 
 中文界面需要系统提供中文字体，例如 `fonts-noto-cjk`。自动测试需要 `dbus-run-session` 和 `gnome-keyring-daemon`；`build.sh test` 在临时主目录、D-Bus 会话和密钥环中运行 CTest。
 

@@ -25,9 +25,6 @@ import tempfile
 import time
 import unittest
 import uuid
-import ssl
-import urllib.error
-import urllib.request
 
 
 TOOL_VERSION = "1.0"
@@ -102,8 +99,8 @@ def write_marker(root: Path) -> dict:
 def ensure_layout(root: Path) -> None:
     for relative in ("fixtures/normal", "fixtures/compression", "fixtures/filters",
                      "fixtures/permissions", "fixtures/links", "fixtures/incremental",
-                     "fixtures/realtime", "fixtures/network", "restore", "archives",
-                     "repositories", "server-data", "manifests", "reports", "evidence"):
+                     "fixtures/realtime", "restore", "archives",
+                     "repositories", "manifests", "reports", "evidence"):
         (root / relative).mkdir(parents=True, exist_ok=True)
 
 
@@ -223,12 +220,6 @@ def generate_fixtures(root: Path, profile: str, reset: bool) -> None:
     (realtime / "README.txt").write_text("Perform realtime cases in this directory.\n", encoding="utf-8")
     write_pattern(realtime / "bulk/template.bin", 1024 * 1024, "increment")
 
-    network = root / "fixtures/network"
-    write_pattern(network / "alice/multi-block.bin", 12 * 1024**2, "random", 501)
-    shutil.copyfile(network / "alice/multi-block.bin", network / "alice/duplicate.bin")
-    (network / "alice/empty.bin").touch()
-    write_pattern(network / "bob/private.bin", 5 * 1024**2, "random", 502)
-
     if profile == "stress":
         write_pattern(normal / "stress-512m.bin", 512 * 1024**2, "random", 700)
         write_pattern(normal / "stress-1g.bin", 1024**3, "repeat", 701)
@@ -261,6 +252,14 @@ def entry_type(path: Path, attributes: int) -> str:
         return "directory"
     if stat.S_ISREG(info.st_mode):
         return "file"
+    if stat.S_ISFIFO(info.st_mode):
+        return "fifo"
+    if stat.S_ISCHR(info.st_mode):
+        return "char_device"
+    if stat.S_ISBLK(info.st_mode):
+        return "block_device"
+    if stat.S_ISSOCK(info.st_mode):
+        return "socket"
     return "special"
 
 def build_manifest(base: Path) -> dict:
@@ -268,6 +267,7 @@ def build_manifest(base: Path) -> dict:
     if not base.exists():
         raise FileNotFoundError(base)
     entries: list[dict] = []
+    hardlinks: dict[tuple[int, int], list[dict]] = {}
     stack = [base]
     while stack:
         current = stack.pop()
@@ -285,6 +285,7 @@ def build_manifest(base: Path) -> dict:
             entry = {"path": relative, "kind": kind, "mtimeNs": info.st_mtime_ns,
                      "attributes": attrs, "uid": info.st_uid, "gid": info.st_gid}
             if kind == "file":
+                hardlinks.setdefault((info.st_dev, info.st_ino), []).append(entry)
                 try:
                     entry.update(size=info.st_size, sha256=sha256_file(path))
                 except OSError as exc:
@@ -297,7 +298,14 @@ def build_manifest(base: Path) -> dict:
             elif kind == "directory":
                 entry["empty"] = not any(os.scandir(path))
                 stack.append(path)
+            elif kind in ("char_device", "block_device"):
+                entry.update(major=os.major(info.st_rdev), minor=os.minor(info.st_rdev))
             entries.append(entry)
+    for group in hardlinks.values():
+        if len(group) > 1:
+            peers = sorted(entry["path"] for entry in group)
+            for entry in group:
+                entry["hardlinkPeers"] = peers
     entries.sort(key=lambda item: item["path"].casefold())
     return {"schema": 2, "toolVersion": TOOL_VERSION, "base": str(base),
             "generatedAt": now_iso(), "host": socket.gethostname(), "user": getpass.getuser(),
@@ -365,6 +373,12 @@ def compare_manifests(source: dict, restored: dict, tolerance_ns: int) -> list[d
                 f"{a.get('size')} / {b.get('size')}")
             add("PASS" if a.get("sha256") == b.get("sha256") else "FAIL", "SHA-256", path,
                 f"{a.get('sha256')} / {b.get('sha256')}")
+            add("PASS" if a.get("hardlinkPeers", []) == b.get("hardlinkPeers", []) else "FAIL",
+                "Hardlink", path, f"{a.get('hardlinkPeers', [])} / {b.get('hardlinkPeers', [])}")
+        if a["kind"] in ("char_device", "block_device"):
+            expected = (a.get("major"), a.get("minor"))
+            actual = (b.get("major"), b.get("minor"))
+            add("PASS" if expected == actual else "FAIL", "Device", path, f"{expected} / {actual}")
         if a["kind"] == "directory" and a.get("empty"):
             add("PASS" if b.get("empty") else "FAIL", "Empty directory", path, "空目录应被保留")
         if a["kind"] == "symlink":
@@ -593,72 +607,6 @@ def command_self_test(_: argparse.Namespace) -> int:
     return EXIT_OK if result.wasSuccessful() else EXIT_FAILED
 
 
-def command_server_cert(args: argparse.Namespace) -> int:
-    output = Path(args.output).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    openssl = shutil.which("openssl")
-    if not openssl:
-        raise FileNotFoundError("未找到 openssl；请安装 OpenSSL")
-    cert, key = output / "server-cert.pem", output / "server-key.pem"
-    config = output / "openssl-test.cnf"
-    config.write_text("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=localhost\n", encoding="ascii")
-    result = run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-sha256",
-                  "-nodes", "-days", "30", "-config", str(config),
-                  "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
-                  "-keyout", str(key), "-out", str(cert)])
-    if result.returncode:
-        print(result.stderr, file=sys.stderr)
-        return EXIT_FAILED
-    print(f"Certificate: {cert}\nPrivate key: {key}")
-    return EXIT_OK
-
-
-def command_server_smoke(args: argparse.Namespace) -> int:
-    base = args.server.rstrip("/") + "/api/v1"
-    username = f"acceptance-{uuid.uuid4().hex[:10]}"
-    password = "DBackup-Acceptance-Only!2026"
-    context = ssl.create_default_context(cafile=args.ca) if args.ca else ssl._create_unverified_context()
-    results: list[tuple[str, bool, str]] = []
-
-    def call(path: str, payload: dict | None = None, token: str = "", *, method: str | None = None,
-             body: bytes | None = None) -> dict:
-        data = body if body is not None else (json.dumps(payload).encode() if payload is not None else None)
-        request = urllib.request.Request(base + path, data=data,
-            headers={"Content-Type": "application/octet-stream" if body is not None else "application/json", **({"Authorization": "Bearer " + token} if token else {})},
-            method=method or ("POST" if data is not None else "GET"))
-        with urllib.request.urlopen(request, context=context, timeout=10) as response:
-            raw = response.read()
-            return {"_binary": raw} if response.headers.get_content_type() == "application/octet-stream" else json.loads(raw.decode("utf-8"))
-
-    token = ""
-    try:
-        call("/register", {"username": username, "password": password}); results.append(("register", True, "201"))
-        token = call("/login", {"username": username, "password": password})["token"]; results.append(("login", bool(token), "token received"))
-        status = call("/status", token=token); results.append(("status", status.get("connected") is True, json.dumps(status)))
-        chunk = b"DBackup server acceptance chunk"
-        chunk_hash = hashlib.sha256(chunk).hexdigest()
-        missing = call("/chunks/check", {"hashes": [chunk_hash]}, token)["missing"]
-        results.append(("chunk-check", chunk_hash in missing, "missing chunk reported"))
-        call("/chunks/" + chunk_hash, token=token, method="PUT", body=chunk)
-        downloaded = call("/chunks/" + chunk_hash, token=token)["_binary"]
-        results.append(("chunk-roundtrip", downloaded == chunk, "PUT/GET content matches"))
-        snapshot_id = "acceptance-" + uuid.uuid4().hex
-        call("/snapshots", {"id": snapshot_id, "name": "Acceptance", "chunks": [chunk_hash]}, token)
-        snapshot = call("/snapshots/" + snapshot_id, token=token)
-        results.append(("snapshot-commit", snapshot.get("id") == snapshot_id, "snapshot available"))
-        snapshots = call("/snapshots", token=token); results.append(("snapshots", "snapshots" in snapshots, "list available"))
-        call("/snapshots/" + snapshot_id, token=token, method="DELETE")
-        results.append(("snapshot-delete", True, "snapshot deleted"))
-    except (OSError, KeyError, ValueError, urllib.error.HTTPError) as exc:
-        results.append(("request", False, str(exc)))
-    report = Path(args.report).resolve(); report.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# DBackup Server Smoke Report", "", f"- Server: `{args.server}`", f"- Time: `{now_iso()}`", "", "| Check | Result | Detail |", "|---|---|---|"]
-    for name, passed, detail in results:
-        escaped_detail = detail.replace("|", "\\|")
-        lines.append(f"| {name} | {'PASS' if passed else 'FAIL'} | {escaped_detail} |")
-    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(report)
-    return EXIT_OK if results and all(item[1] for item in results) else EXIT_FAILED
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -702,14 +650,6 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.set_defaults(handler=command_cleanup)
     self_test = sub.add_parser("self-test")
     self_test.set_defaults(handler=command_self_test)
-    certificate = sub.add_parser("server-cert", help="Generate a localhost acceptance certificate")
-    certificate.add_argument("--output", required=True)
-    certificate.set_defaults(handler=command_server_cert)
-    smoke = sub.add_parser("server-smoke", help="Exercise the HTTPS authentication and listing API")
-    smoke.add_argument("--server", default="https://127.0.0.1:8443")
-    smoke.add_argument("--ca")
-    smoke.add_argument("--report", required=True)
-    smoke.set_defaults(handler=command_server_smoke)
     return parser
 
 

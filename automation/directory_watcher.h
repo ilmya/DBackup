@@ -13,7 +13,7 @@ class DirectoryWatcher {
     ~DirectoryWatcher();
     bool start(const std::string &path, Callback callback, std::string &error,
                unsigned debounceMs = 3000, unsigned maximumDelayMs = 30000,
-               StatusCallback statusCallback = {});
+               StatusCallback statusCallback = {}, bool recursive = true);
     void stop();
     bool running() const { return running_.load(); }
  private:
@@ -22,6 +22,7 @@ class DirectoryWatcher {
     Callback callback_;
     StatusCallback statusCallback_;
     unsigned debounceMs_=3000, maximumDelayMs_=30000;
+    bool recursive_ = true;
     std::atomic_bool running_{false};
     std::thread worker_;
 };

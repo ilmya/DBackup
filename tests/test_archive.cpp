@@ -196,7 +196,7 @@ TEST_F(ArchiveServiceTest, ArchiveHeaderFormat) {
     WriteFile(srcDir + "/test.txt", "header test");
     std::string error; ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
     std::ifstream f(abkFile, std::ios::binary); char magic[8]; f.read(magic, 8);
-    EXPECT_EQ(std::string(magic, 8), "DBLIN001");
+    EXPECT_EQ(std::string(magic, 8), "DBPK0001");
 }
 
 TEST_F(ArchiveServiceTest, RejectsUnsupportedArchiveVersions) {
@@ -323,6 +323,18 @@ TEST(FilterOptionsTest, StrictValidation) {
     EXPECT_FALSE(ParseFilterOptions("minsize=20;maxsize=10", filter, error));
 }
 
+TEST(FilterOptionsTest, RejectsInvalidProgrammaticConditions) {
+    FilterOptions filter;
+    std::string error;
+    EXPECT_TRUE(ValidateFilterOptions(filter, error));
+    filter.minSize = 20; filter.maxSize = 10;
+    EXPECT_FALSE(ValidateFilterOptions(filter, error));
+    filter = {}; filter.afterMtimeMs = 20; filter.beforeMtimeMs = 10;
+    EXPECT_FALSE(ValidateFilterOptions(filter, error));
+    filter = {}; filter.pathRules.push_back({true, ""});
+    EXPECT_FALSE(ValidateFilterOptions(filter, error));
+}
+
 TEST_F(ArchiveServiceTest, UnicodeAndEmojiFileNamesRoundTrip) {
     const std::string name = u8"emoji-📦-中文.txt";
     WriteFile(srcDir + "/" + name, "unicode path payload");
@@ -377,6 +389,15 @@ TEST_F(ArchiveServiceTest, DetectsArchiveTampering) {
 }
 
 /** Sprint 1/2: replacing an existing archive still produces a valid final file. */
+TEST_F(ArchiveServiceTest, NoReplacePreservesExistingArchive) {
+    WriteFile(srcDir + "/new.txt", "new data");
+    WriteFile(abkFile, "existing data");
+    PackOptions options; OperationContext context; context.noReplace=true; std::string error;
+    EXPECT_FALSE(ArchiveService::create(std::vector<std::string>{srcDir},abkFile,options,error,context));
+    EXPECT_EQ(ReadFile(abkFile), "existing data");
+    EXPECT_FALSE(error.empty());
+}
+
 TEST_F(ArchiveServiceTest, AtomicallyReplacesExistingArchive) {
     std::string error;
     WriteFile(srcDir + "/new.txt", "new data");

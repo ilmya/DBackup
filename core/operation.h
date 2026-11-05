@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 enum class OperationStage { Scanning, Reading, Compressing, Encrypting, Writing, Uploading, Downloading, Restoring, Completed };
 
@@ -20,7 +21,11 @@ struct OperationProgress {
 struct OperationContext {
     std::atomic_bool *cancelled = nullptr;
     std::function<void(const OperationProgress &)> onProgress;
+    bool allowDeviceNodes = true;
+    bool noReplace = false;
+    std::vector<std::string> *warnings = nullptr;
 
     bool isCancelled() const { return cancelled && cancelled->load(); }
     void report(const OperationProgress &progress) const { if (onProgress) onProgress(progress); }
+    void warn(const std::string &message) const { if (warnings) warnings->push_back(message); }
 };

@@ -5,7 +5,10 @@
 #include <fnmatch.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/syscall.h>
 #include <algorithm>
+#include <cerrno>
 #include <map>
 #include <set>
 
@@ -13,17 +16,43 @@ namespace dbackup::archive_scan {
 namespace fs = std::filesystem;
 namespace {
 
+bool selectedSourcePath(const fs::path &path, const FilterOptions &filter) {
+    if (filter.sourceRules.empty()) return true;
+    const auto absolute = fs::absolute(path).lexically_normal();
+    size_t best = 0;
+    bool selected = false;
+    for (const auto &rule : filter.sourceRules) {
+        const auto root = fs::path(rule.path).lexically_normal();
+        const auto relative = absolute.lexically_relative(root);
+        if (absolute != root && (relative.empty() || *relative.begin() == "..")) continue;
+        const size_t depth = std::distance(root.begin(), root.end());
+        if (depth >= best) { best = depth; selected = rule.include; }
+    }
+    return selected;
+}
+bool mayContainSelected(const fs::path &path, const FilterOptions &filter) {
+    if (selectedSourcePath(path, filter)) return true;
+    const auto root = fs::absolute(path).lexically_normal();
+    for (const auto &rule : filter.sourceRules) {
+        if (!rule.include) continue;
+        const auto relative = fs::path(rule.path).lexically_relative(root);
+        if (!relative.empty() && *relative.begin() != "..") return true;
+    }
+    return false;
+}
+bool permissionFailure(int value) { return value == EACCES || value == EPERM; }
+
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
     return value;
 }
 
-bool matches(const Entry &entry, const FilterOptions &filter) {
+bool matches(const Entry &entry, const FilterOptions &filter, const fs::path &filterPath) {
     const bool directory = entry.type == 1;
     if (filter.type == EntryTypeFilter::FilesOnly && directory) return false;
     if (filter.type == EntryTypeFilter::DirectoriesOnly && !directory) return false;
-    const auto path = lower(entry.relativePath);
-    const auto name = lower(fs::path(entry.relativePath).filename().string());
+    const auto path = lower(filterPath.generic_string());
+    const auto name = lower(filterPath.filename().string());
     bool includes = false, included = false;
     for (const auto &rule : filter.pathRules) {
         includes |= rule.include;
@@ -59,12 +88,13 @@ bool matches(const Entry &entry, const FilterOptions &filter) {
 }
 
 void addPreview(BackupPreview &result, const Entry &entry, bool included) {
+    const uint64_t bytes = entry.type == 0 ? entry.metadata.size : 0;
     if (entry.type == 1) {
         if (included) ++result.includedDirectories; else ++result.excludedDirectories;
     } else if (included) {
-        ++result.includedFiles; result.includedBytes += entry.metadata.size;
+        ++result.includedFiles; result.includedBytes += bytes;
     } else {
-        ++result.excludedFiles; result.excludedBytes += entry.metadata.size;
+        ++result.excludedFiles; result.excludedBytes += bytes;
     }
 }
 }
@@ -74,6 +104,8 @@ bool collect(const std::vector<std::string> &sources, const fs::path &excluded,
              BackupPreview *preview, const OperationContext &context, std::string &error, bool includeSingleDirectoryRoot) {
     entries.clear();
     if (preview) *preview = {};
+    if (context.isCancelled()) { error = "操作已取消"; return false; }
+    if (!ValidateFilterOptions(filter, error)) return false;
     if (sources.empty()) { error = "请至少选择一个备份来源"; return false; }
     std::error_code ec;
     const fs::path excludedAbsolute = excluded.empty() ? fs::path() : fs::absolute(excluded, ec).lexically_normal();
@@ -81,17 +113,25 @@ bool collect(const std::vector<std::string> &sources, const fs::path &excluded,
     std::set<fs::path> uniqueSources;
     std::set<std::string> names;
     std::map<std::pair<uint64_t, uint64_t>, std::string> hardlinks;
-    auto process = [&](const fs::path &path, const fs::path &relative, bool forceDirectory) {
+    auto process = [&](const fs::path &path, const fs::path &relative, const fs::path &filterRelative, bool forceDirectory) {
         if (context.isCancelled()) { error = "操作已取消"; return false; }
         if (!excludedAbsolute.empty() && fs::absolute(path, ec).lexically_normal() == excludedAbsolute) return true;
         if (ec) { error = ec.message(); return false; }
+        if (!selectedSourcePath(path, filter)) return true;
         Entry entry; entry.source = path; entry.relativePath = relative.generic_string();
-        if (!linux_file::readMetadata(path, entry.metadata, error)) return false;
+        if (!linux_file::readMetadata(path, entry.metadata, error)) {
+            if (permissionFailure(errno)) { context.warn(error); error.clear(); return true; }
+            return false;
+        }
         if (S_ISDIR(entry.metadata.mode)) entry.type = 1;
         else if (S_ISLNK(entry.metadata.mode)) entry.type = 2;
-        else if (!S_ISREG(entry.metadata.mode)) { error = "不支持的特殊文件: " + path.string(); return false; }
+        else if (S_ISFIFO(entry.metadata.mode)) entry.type = 4;
+        else if (S_ISCHR(entry.metadata.mode)) entry.type = 5;
+        else if (S_ISBLK(entry.metadata.mode)) entry.type = 6;
+        else if (S_ISSOCK(entry.metadata.mode)) entry.type = 7;
+        else if (!S_ISREG(entry.metadata.mode)) { error = "不支持的文件类型（例如套接字）: " + path.string(); return false; }
         if (const passwd *owner = getpwuid(entry.metadata.uid)) entry.owner = owner->pw_name;
-        const bool selected = forceDirectory || matches(entry, filter);
+        const bool selected = forceDirectory || matches(entry, filter, filterRelative);
         if (preview) addPreview(*preview, entry, selected);
         if (!selected) return true;
         if (!linux_file::validRelativePath(relative) || !names.insert(entry.relativePath).second) {
@@ -116,27 +156,66 @@ bool collect(const std::vector<std::string> &sources, const fs::path &excluded,
         }
         if (!uniqueSources.insert(absolute).second) continue;
         linux_file::Metadata metadata;
-        if (!linux_file::readMetadata(absolute, metadata, error)) return false;
+        if (!linux_file::readMetadata(absolute, metadata, error)) {
+            if (permissionFailure(errno)) { context.warn(error); error.clear(); continue; }
+            return false;
+        }
         const bool directory = S_ISDIR(metadata.mode);
         const bool rootIncluded = includeSingleDirectoryRoot || sources.size() > 1 || !directory;
         fs::path rootName = absolute.filename();
         if (rootIncluded && rootName.empty()) { error = "无法使用文件系统根目录作为多个来源之一"; return false; }
-        if (rootIncluded && !process(absolute, rootName, directory)) return false;
+        if (rootIncluded && !process(absolute, rootName, rootName, directory)) return false;
         if (!directory) continue;
-        fs::recursive_directory_iterator it(absolute, fs::directory_options::none, ec), end;
-        if (ec) { error = "无法扫描目录: " + absolute.string() + ": " + ec.message(); return false; }
-        while (it != end) {
-            fs::path relative = it->path().lexically_relative(absolute);
-            if (rootIncluded) relative = rootName / relative;
-            if (!process(it->path(), relative, false)) return false;
-            it.increment(ec);
-            if (ec) { error = "无法扫描目录: " + ec.message(); return false; }
-        }
+        std::function<bool(const fs::path &)> walk = [&](const fs::path &directoryPath) {
+            std::error_code scanError;
+            fs::directory_iterator it(directoryPath, fs::directory_options::none, scanError), end;
+            if (scanError) {
+                if (permissionFailure(scanError.value())) { context.warn(directoryPath.string() + ": " + scanError.message()); return true; }
+                error = "无法扫描目录: " + directoryPath.string() + ": " + scanError.message(); return false;
+            }
+            while (it != end) {
+                const fs::path child = it->path();
+                fs::path filterRelative = child.lexically_relative(absolute);
+                fs::path relative = rootIncluded ? rootName / filterRelative : filterRelative;
+                if (sources.size() > 1) filterRelative = rootName / filterRelative;
+                if (!process(child, relative, filterRelative, false)) return false;
+                const auto status = it->symlink_status(scanError);
+                if (scanError) {
+                    if (permissionFailure(scanError.value())) context.warn(child.string() + ": " + scanError.message());
+                    else { error = child.string() + ": " + scanError.message(); return false; }
+                    scanError.clear();
+                } else if (fs::is_directory(status) && mayContainSelected(child, filter) && !walk(child)) return false;
+                it.increment(scanError);
+                if (scanError) { error = "扫描目录失败: " + directoryPath.string() + ": " + scanError.message(); return false; }
+            }
+            return true;
+        };
+        if (!walk(absolute)) return false;
     }
     return true;
 }
 }  // namespace dbackup::archive_scan
 
+bool ValidateFilterOptions(const FilterOptions &filter, std::string &error) {
+    if (static_cast<unsigned>(filter.type) > static_cast<unsigned>(EntryTypeFilter::DirectoriesOnly)) {
+        error = "文件类型条件无效"; return false;
+    }
+    if (filter.maxSize && filter.minSize > filter.maxSize) {
+        error = "最小文件大小不能大于最大文件大小"; return false;
+    }
+    if (filter.afterMtimeMs && filter.beforeMtimeMs && filter.afterMtimeMs > filter.beforeMtimeMs) {
+        error = "开始日期不能晚于结束日期"; return false;
+    }
+    for (const auto &rule : filter.pathRules) {
+        if (rule.pattern.empty()) { error = "路径规则不能为空"; return false; }
+    }
+    for (const auto &rule : filter.sourceRules) {
+        const std::filesystem::path path(rule.path);
+        if (!path.is_absolute() || path.lexically_normal() != path) { error = "来源选择路径无效"; return false; }
+    }
+    error.clear();
+    return true;
+}
 
 #include "core/crypto.h"
 
@@ -147,7 +226,7 @@ bool collect(const std::vector<std::string> &sources, const fs::path &excluded,
 
 namespace dbackup::archive_format {
 namespace {
-constexpr uint8_t magic[] = {'D','B','L','I','N','0','0','1'};
+constexpr uint8_t magic[] = {'D','B','L','I','N','0','0','2'};
 constexpr size_t digestSize = 32, saltSize = 16, nonceSize = 12, tagSize = 16;
 constexpr uint64_t maxEntries = 10000000;
 
@@ -197,7 +276,7 @@ bool encode(const std::vector<Entry> &entries, int compressionLevel, const std::
     put64(body, entries.size());
     for (const auto &entry : entries) {
         const auto &file = entry.file;
-        if (file.type > 3 || !linux_file::validRelativePath(file.relativePath)) {
+        if (file.type > 7 || !linux_file::validRelativePath(file.relativePath)) {
             error = "归档条目路径或类型无效: " + file.relativePath; return false;
         }
         if (file.type != 0 && !entry.data.empty()) { error = "非普通文件包含数据"; return false; }
@@ -207,6 +286,8 @@ bool encode(const std::vector<Entry> &entries, int compressionLevel, const std::
         put64(body, file.metadata.uid);
         put64(body, file.metadata.gid);
         put64(body, static_cast<uint64_t>(file.metadata.mtimeNs));
+        put64(body, file.metadata.deviceMajor);
+        put64(body, file.metadata.deviceMinor);
         putString(body, file.owner);
         putString(body, file.linkTarget);
         put64(body, entry.data.size());
@@ -278,11 +359,14 @@ bool decode(const std::vector<uint8_t> &input, const std::string &password,
     uint64_t count = 0;
     if (!reader.integer(count) || count > maxEntries) { error = "归档条目数量无效"; return false; }
     for (uint64_t i = 0; i < count; ++i) {
-        Entry entry; uint64_t type, mode, uid, gid, mtime, size, compressed;
-        if (!reader.integer(type) || type > 3 || !reader.string(entry.file.relativePath) ||
+        Entry entry; uint64_t type, mode, uid, gid, mtime, majorNumber, minorNumber, size, compressed;
+        if (!reader.integer(type) || type > 7 || !reader.string(entry.file.relativePath) ||
             !linux_file::validRelativePath(entry.file.relativePath) || !reader.integer(mode) ||
             !reader.integer(uid) || !reader.integer(gid) || !reader.integer(mtime) ||
+            !reader.integer(majorNumber) || !reader.integer(minorNumber) ||
             mode > UINT32_MAX || uid > UINT32_MAX || gid > UINT32_MAX ||
+            majorNumber > UINT32_MAX || minorNumber > UINT32_MAX ||
+            ((type != 5 && type != 6) && (majorNumber || minorNumber)) ||
             !reader.string(entry.file.owner) || !reader.string(entry.file.linkTarget) ||
             !reader.integer(size) || !reader.integer(compressed) || compressed > 1 ||
             !reader.data(entry.data)) { error = "归档条目无效"; entries.clear(); return false; }
@@ -292,7 +376,16 @@ bool decode(const std::vector<uint8_t> &input, const std::string &password,
         entry.file.metadata.uid = static_cast<uint32_t>(uid);
         entry.file.metadata.gid = static_cast<uint32_t>(gid);
         entry.file.metadata.mtimeNs = static_cast<int64_t>(mtime);
+        entry.file.metadata.deviceMajor = static_cast<uint32_t>(majorNumber);
+        entry.file.metadata.deviceMinor = static_cast<uint32_t>(minorNumber);
         entry.file.metadata.size = size;
+        const mode_t kind = static_cast<mode_t>(mode);
+        if ((type == 0 && !S_ISREG(kind)) || (type == 1 && !S_ISDIR(kind)) ||
+            (type == 2 && !S_ISLNK(kind)) || (type == 3 && !S_ISREG(kind)) ||
+            (type == 4 && !S_ISFIFO(kind)) || (type == 5 && !S_ISCHR(kind)) ||
+            (type == 6 && !S_ISBLK(kind)) || (type == 7 && !S_ISSOCK(kind))) {
+            error = "归档文件类型与元数据不一致"; entries.clear(); return false;
+        }
         if (type != 0 && (size || !entry.data.empty() || compressed)) {
             error = "非普通文件包含数据"; entries.clear(); return false;
         }
@@ -349,6 +442,15 @@ bool fail(const std::string &path, std::string &error) {
     error = path + ": " + std::strerror(errno);
     return false;
 }
+bool recoverableError(int value) {
+    return value == EACCES || value == EPERM || value == ENOTSUP || value == EOPNOTSUPP;
+}
+bool metadataFailure(const std::string &path, std::string &warnings) {
+    if (!recoverableError(errno)) return fail(path, warnings);
+    if (!warnings.empty()) warnings += "\n";
+    warnings += path + ": 元数据未完整恢复: " + std::strerror(errno);
+    return true;
+}
 
 // Resolve each component relative to an already-open directory, never following links.
 FileDescriptor directoryAt(int root, const fs::path &path, bool create, std::string &error) {
@@ -375,21 +477,51 @@ timespec modificationTime(int64_t nanos) {
     return value;
 }
 
+void verifyMetadata(const struct stat &actual, const linux_file::Metadata &expected,
+                    const std::string &path, bool symlink, std::string &warnings) {
+    const int64_t actualMtime = int64_t(actual.st_mtim.tv_sec) * 1000000000LL + actual.st_mtim.tv_nsec;
+    std::string fields;
+    if (actual.st_uid != expected.uid || actual.st_gid != expected.gid) fields += "属主/属组 ";
+    if (!symlink && (actual.st_mode & 07777) != (expected.mode & 07777)) fields += "权限 ";
+    if (actualMtime != expected.mtimeNs) fields += "修改时间 ";
+    if (!fields.empty()) {
+        if (!warnings.empty()) warnings += "\n";
+        warnings += path + ": 目标文件系统未保留 " + fields;
+    }
+}
+
 bool metadataFd(int fd, const linux_file::Metadata &metadata, const std::string &path, std::string &error) {
-    if (fchown(fd, metadata.uid, metadata.gid) != 0 || fchmod(fd, metadata.mode & 07777) != 0)
-        return fail(path, error);
+    if (fchown(fd, metadata.uid, metadata.gid) != 0 && !metadataFailure(path, error)) return false;
+    if (fchmod(fd, metadata.mode & 07777) != 0 && !metadataFailure(path, error)) return false;
     timespec times[2]{{0, UTIME_OMIT}, modificationTime(metadata.mtimeNs)};
-    if (futimens(fd, times) != 0) return fail(path, error);
+    if (futimens(fd, times) != 0 && !metadataFailure(path, error)) return false;
+    struct stat actual{};
+    if (fstat(fd, &actual) != 0) return fail(path, error);
+    verifyMetadata(actual, metadata, path, false, error);
     return true;
 }
 
 bool metadataLink(int parent, const std::string &name, const linux_file::Metadata &metadata,
                   const std::string &path, std::string &error) {
-    if (fchownat(parent, name.c_str(), metadata.uid, metadata.gid, AT_SYMLINK_NOFOLLOW) != 0)
-        return fail(path, error);
+    if (fchownat(parent, name.c_str(), metadata.uid, metadata.gid, AT_SYMLINK_NOFOLLOW) != 0 && !metadataFailure(path, error)) return false;
     timespec times[2]{{0, UTIME_OMIT}, modificationTime(metadata.mtimeNs)};
-    if (utimensat(parent, name.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0) return fail(path, error);
+    if (utimensat(parent, name.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0 && !metadataFailure(path, error)) return false;
+    struct stat actual{};
+    if (fstatat(parent, name.c_str(), &actual, AT_SYMLINK_NOFOLLOW) != 0) return fail(path, error);
+    verifyMetadata(actual, metadata, path, true, error);
     return true;
+}
+
+int chmodNoFollow(int parent, const char *name, mode_t mode) {
+#if defined(SYS_fchmodat2)
+    if (syscall(SYS_fchmodat2, parent, name, mode, AT_SYMLINK_NOFOLLOW) == 0) return 0;
+    if (errno != ENOSYS) return -1;
+#elif defined(__x86_64__) || defined(__aarch64__)
+    // Ubuntu 22.04 headers predate fchmodat2, but newer Linux kernels provide it.
+    if (syscall(452, parent, name, mode, AT_SYMLINK_NOFOLLOW) == 0) return 0;
+    if (errno != ENOSYS) return -1;
+#endif
+    return fchmodat(parent, name, mode, AT_SYMLINK_NOFOLLOW);
 }
 
 bool writeFile(int parent, const std::string &name, const archive_format::Entry &entry,
@@ -411,8 +543,11 @@ bool writeFile(int parent, const std::string &name, const archive_format::Entry 
         if (written <= 0) { fail(entry.file.relativePath, error); unlinkat(parent, temp.c_str(), 0); return false; }
         offset += static_cast<size_t>(written);
     }
-    if (!metadataFd(output.get(), entry.file.metadata, entry.file.relativePath, error) || fsync(output.get()) != 0) {
-        if (error.empty()) fail(entry.file.relativePath, error);
+    if (!metadataFd(output.get(), entry.file.metadata, entry.file.relativePath, error)) {
+        unlinkat(parent, temp.c_str(), 0); return false;
+    }
+    if (fsync(output.get()) != 0) {
+        fail(entry.file.relativePath, error);
         unlinkat(parent, temp.c_str(), 0); return false;
     }
     if (renameat(parent, temp.c_str(), parent, name.c_str()) != 0) {
@@ -429,7 +564,7 @@ bool restore(const std::vector<archive_format::Entry> &entries, const fs::path &
     for (const auto &entry : entries) {
         const auto &file = entry.file;
         fs::path path(file.relativePath);
-        if (!linux_file::validRelativePath(path) || file.type > 3 || !paths.insert(file.relativePath).second) {
+        if (!linux_file::validRelativePath(path) || file.type > 7 || !paths.insert(file.relativePath).second) {
             error = "归档包含重复或不安全的路径: " + file.relativePath; return false;
         }
         if (file.type == 2) {
@@ -448,38 +583,113 @@ bool restore(const std::vector<archive_format::Entry> &entries, const fs::path &
     FileDescriptor root(linux_file::openDirectory(destination, true, error));
     if (root.get() < 0) return false;
     uint64_t completed = 0;
+    std::vector<std::string> warnings;
+    std::set<std::string> skippedDirectories, skippedPaths;
+    auto skip = [&](const std::string &path, const std::string &reason, bool directory) {
+        warnings.push_back(path + ": " + reason);
+        skippedPaths.insert(path);
+        if (directory) skippedDirectories.insert(path);
+    };
+    auto parentSkipped = [&](const fs::path &path) {
+        for (const auto &parent : skippedDirectories) {
+            auto relative = path.lexically_relative(parent);
+            if (!relative.empty() && *relative.begin() != "..") return true;
+        }
+        return false;
+    };
     for (const auto &entry : entries) {
         if (context.isCancelled()) { error = "操作已取消"; return false; }
         const auto &file = entry.file;
         fs::path path(file.relativePath);
-        FileDescriptor parent = directoryAt(root.get(), path.parent_path(), true, error);
-        if (parent.get() < 0) return false;
-        const std::string name = path.filename().string();
-        if (file.type == 1) {
-            if (mkdirat(parent.get(), name.c_str(), 0700) != 0 && errno != EEXIST) return fail(file.relativePath, error);
-            FileDescriptor directory(openat(parent.get(), name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-            if (directory.get() < 0) return fail(file.relativePath, error);
-        } else if (file.type == 0) {
-            if (!writeFile(parent.get(), name, entry, context, error)) return false;
-        } else if (file.type == 2) {
-            if (symlinkat(file.linkTarget.c_str(), parent.get(), name.c_str()) != 0) return fail(file.relativePath, error);
-            if (!metadataLink(parent.get(), name, file.metadata, file.relativePath, error)) return false;
-        } else {
-            fs::path target(file.linkTarget);
-            FileDescriptor targetParent = directoryAt(root.get(), target.parent_path(), false, error);
-            if (targetParent.get() < 0) return false;
-            if (linkat(targetParent.get(), target.filename().c_str(), parent.get(), name.c_str(), 0) != 0)
-                return fail(file.relativePath, error);
+        if (parentSkipped(path)) { skip(file.relativePath, "上级目录未恢复", file.type == 1); continue; }
+        if ((file.type == 5 || file.type == 6) && !context.allowDeviceNodes) {
+            skip(file.relativePath, "设备节点恢复未启用", false); continue;
         }
+        if (file.type == 3 && skippedPaths.count(file.linkTarget)) {
+            skip(file.relativePath, "硬链接目标未恢复", false); continue;
+        }
+        std::string detail;
+        errno = 0;
+        FileDescriptor parent = directoryAt(root.get(), path.parent_path(), true, detail);
+        if (parent.get() < 0) {
+            if (recoverableError(errno)) { skip(file.relativePath, detail, file.type == 1); continue; }
+            error = detail; return false;
+        }
+        const std::string name = path.filename().string();
+        bool ok = true;
+        if (file.type == 1) {
+            if (mkdirat(parent.get(), name.c_str(), 0700) != 0 && errno != EEXIST) ok = fail(file.relativePath, detail);
+            if (ok) {
+                FileDescriptor directory(openat(parent.get(), name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+                if (directory.get() < 0) ok = fail(file.relativePath, detail);
+            }
+        } else if (file.type == 0) {
+            ok = writeFile(parent.get(), name, entry, context, detail);
+        } else if (file.type == 2) {
+            if (symlinkat(file.linkTarget.c_str(), parent.get(), name.c_str()) != 0) ok = fail(file.relativePath, detail);
+            else ok = metadataLink(parent.get(), name, file.metadata, file.relativePath, detail);
+        } else if (file.type == 3) {
+            fs::path target(file.linkTarget);
+            FileDescriptor targetParent = directoryAt(root.get(), target.parent_path(), false, detail);
+            if (targetParent.get() < 0) ok = false;
+            else {
+                struct stat targetInfo{};
+                if (fstatat(targetParent.get(), target.filename().c_str(), &targetInfo, AT_SYMLINK_NOFOLLOW) != 0 ||
+                    !S_ISREG(targetInfo.st_mode)) { error = "硬链接目标不是普通文件: " + file.linkTarget; return false; }
+                if (linkat(targetParent.get(), target.filename().c_str(), parent.get(), name.c_str(), 0) != 0)
+                    ok = fail(file.relativePath, detail);
+            }
+        } else {
+            const mode_t type = file.type == 4 ? S_IFIFO : (file.type == 5 ? S_IFCHR : (file.type == 6 ? S_IFBLK : S_IFSOCK));
+            dev_t device = makedev(file.metadata.deviceMajor, file.metadata.deviceMinor);
+            if ((file.type == 5 || file.type == 6) &&
+                (major(device) != file.metadata.deviceMajor || minor(device) != file.metadata.deviceMinor)) {
+                error = "设备号无效: " + file.relativePath; return false;
+            }
+            if (mknodat(parent.get(), name.c_str(), type | (file.metadata.mode & 07777), device) != 0)
+                ok = fail(file.relativePath, detail);
+            else {
+                if (fchownat(parent.get(), name.c_str(), file.metadata.uid, file.metadata.gid, AT_SYMLINK_NOFOLLOW) != 0)
+                    ok = metadataFailure(file.relativePath, detail);
+                if (ok && chmodNoFollow(parent.get(), name.c_str(), file.metadata.mode & 07777) != 0)
+                    ok = metadataFailure(file.relativePath, detail);
+                timespec times[2]{{0, UTIME_OMIT}, modificationTime(file.metadata.mtimeNs)};
+                if (ok && utimensat(parent.get(), name.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0)
+                    ok = metadataFailure(file.relativePath, detail);
+                struct stat actual{};
+                if (ok && fstatat(parent.get(), name.c_str(), &actual, AT_SYMLINK_NOFOLLOW) != 0)
+                    ok = fail(file.relativePath, detail);
+                if (ok) verifyMetadata(actual, file.metadata, file.relativePath, false, detail);
+                if (ok && file.type == 7) {
+                    if (!detail.empty()) detail += "\\n";
+                    detail += file.relativePath + ": 套接字节点不包含原服务或连接，可能占用服务路径";
+                }
+            }
+        }
+        if (!ok) {
+            const int cause = errno;
+            if (!context.isCancelled() && (recoverableError(cause) || (file.type == 7 && cause == EEXIST))) {
+                skip(file.relativePath, detail, file.type == 1); continue;
+            }
+            error = detail; return false;
+        }
+        if (!detail.empty()) warnings.push_back(detail);
         OperationProgress progress; progress.stage = OperationStage::Restoring;
         progress.currentPath = file.relativePath; progress.completedFiles = ++completed;
         progress.totalFiles = entries.size(); context.report(progress);
     }
     for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-        if (it->file.type != 1) continue;
-        FileDescriptor directory = directoryAt(root.get(), fs::path(it->file.relativePath), false, error);
-        if (directory.get() < 0 || !metadataFd(directory.get(), it->file.metadata, it->file.relativePath, error)) return false;
+        if (it->file.type != 1 || skippedPaths.count(it->file.relativePath)) continue;
+        std::string detail;
+        FileDescriptor directory = directoryAt(root.get(), fs::path(it->file.relativePath), false, detail);
+        if (directory.get() < 0 || !metadataFd(directory.get(), it->file.metadata, it->file.relativePath, detail)) {
+            if (recoverableError(errno)) { warnings.push_back(detail); continue; }
+            error = detail; return false;
+        }
+        if (!detail.empty()) warnings.push_back(detail);
     }
+    error.clear();
+    for (const auto &warning : warnings) { if (!error.empty()) error += "\\n"; error += warning; context.warn(warning); }
     OperationProgress done; done.stage = OperationStage::Completed;
     done.completedFiles = completed; done.totalFiles = entries.size(); context.report(done);
     return true;
@@ -696,14 +906,19 @@ bool writeArchive(const std::string &path, const std::vector<uint8_t> &data,
     if (ok && fsync(fd) != 0) { error = "刷新归档失败: " + std::string(std::strerror(errno)); ok = false; }
     if (close(fd) != 0 && ok) { error = "关闭归档失败: " + std::string(std::strerror(errno)); ok = false; }
     if (ok && context.isCancelled()) { error = "操作已取消"; ok = false; }
-    if (ok && rename(name.data(), path.c_str()) != 0) { error = "提交归档失败: " + std::string(std::strerror(errno)); ok = false; }
+    if (ok) {
+        const int result = context.noReplace
+            ? static_cast<int>(syscall(SYS_renameat2, AT_FDCWD, name.data(), AT_FDCWD, path.c_str(), 1u))
+            : rename(name.data(), path.c_str());
+        if (result != 0) { error = "提交归档失败: " + std::string(std::strerror(errno)); ok = false; }
+    }
     if (!ok) unlink(name.data());
     return ok;
 }
 
 bool decodeFile(const std::string &path, const std::string &password, std::vector<Entry> &entries, std::string &error) {
     std::vector<uint8_t> bytes;
-    return readArchive(path, bytes, error) && dbackup::archive_format::decode(bytes, password, entries, error);
+    return readArchive(path, bytes, error) && dbackup::archive_format::decodeCurrent(bytes, password, entries, error);
 }
 }
 
@@ -721,28 +936,51 @@ bool ArchiveService::create(const std::vector<std::string> &sources, const std::
 bool ArchiveService::create(const std::vector<std::string> &sources, const std::string &destination,
                             const PackOptions &options, std::string &error, const OperationContext &context) {
     error.clear();
+    std::vector<std::string> localWarnings;
+    OperationContext scanContext = context;
+    if (!scanContext.warnings) scanContext.warnings = &localWarnings;
+    const size_t warningStart = scanContext.warnings->size();
     std::vector<dbackup::archive_scan::Entry> scanned;
     OperationProgress progress; progress.stage = OperationStage::Scanning; context.report(progress);
-    if (!dbackup::archive_scan::collect(sources, destination, options.filter, scanned, nullptr, context, error)) return false;
+    if (!dbackup::archive_scan::collect(sources, destination, options.filter, scanned, nullptr, scanContext, error)) return false;
     std::vector<Entry> entries;
+    std::set<std::string> availableFiles;
     progress.stage = OperationStage::Reading; progress.totalFiles = scanned.size();
     for (auto &item : scanned) {
         if (context.isCancelled()) { error = "操作已取消"; return false; }
         Entry entry; entry.file = std::move(item);
-        if (entry.file.type == 0 && !readSource(entry.file, entry.data, context, error)) return false;
+        errno = 0;
+        if (entry.file.type == 0 && !readSource(entry.file, entry.data, context, error)) {
+            if (errno == EACCES || errno == EPERM) { scanContext.warn(error); error.clear(); continue; }
+            return false;
+        }
+        if (entry.file.type == 3 && !availableFiles.count(entry.file.linkTarget)) {
+            scanContext.warn(entry.file.relativePath + ": 硬链接目标未能备份"); continue;
+        }
+        if (entry.file.type == 0) availableFiles.insert(entry.file.relativePath);
         progress.currentPath = entry.file.relativePath; ++progress.completedFiles; context.report(progress);
         entries.push_back(std::move(entry));
     }
+    if (entries.empty() && scanContext.warnings->size() > warningStart) {
+        error = "没有可备份的内容";
+        for (size_t i = warningStart; i < scanContext.warnings->size(); ++i) error += "\n" + (*scanContext.warnings)[i];
+        return false;
+    }
     progress.stage = OperationStage::Compressing; context.report(progress);
     std::vector<uint8_t> bytes;
-    if (!dbackup::archive_format::encode(entries, options.compressionLevel, options.password, bytes, error) ||
+    if (!dbackup::archive_format::encodeCurrent(entries, options, bytes, error) ||
         !writeArchive(destination, bytes, context, error)) return false;
+    for (size_t i = warningStart; i < scanContext.warnings->size(); ++i) { if (!error.empty()) error += "\n"; error += (*scanContext.warnings)[i]; }
     progress.stage = OperationStage::Completed; context.report(progress); return true;
 }
 bool ArchiveService::preview(const std::vector<std::string> &sources, const FilterOptions &filter,
-                             BackupPreview &preview, std::string &error) {
+                             BackupPreview &preview, std::string &error, bool includeSingleDirectoryRoot) {
     std::vector<dbackup::archive_scan::Entry> scanned;
-    return dbackup::archive_scan::collect(sources, {}, filter, scanned, &preview, {}, error);
+    std::vector<std::string> warnings;
+    OperationContext context; context.warnings = &warnings;
+    if (!dbackup::archive_scan::collect(sources, {}, filter, scanned, &preview, context, error, includeSingleDirectoryRoot)) return false;
+    for (const auto &warning : warnings) { if (!error.empty()) error += "\n"; error += warning; }
+    return true;
 }
 bool ArchiveService::inspect(const std::string &file, std::vector<ArchiveEntry> &entries, std::string &error) {
     return inspect(file, entries, error, "");
@@ -756,6 +994,8 @@ bool ArchiveService::inspect(const std::string &file, std::vector<ArchiveEntry> 
         ArchiveEntry entry{};
         entry.type = item.file.type; entry.flags = item.compressed ? 1 : 0; entry.relativePath = item.file.relativePath;
         entry.mode = item.file.metadata.mode; entry.mtimeMs = item.file.metadata.mtimeNs / 1000000;
+        entry.uid = item.file.metadata.uid; entry.gid = item.file.metadata.gid;
+        entry.deviceMajor = item.file.metadata.deviceMajor; entry.deviceMinor = item.file.metadata.deviceMinor;
         entry.owner = item.file.owner; entry.linkTarget = item.file.linkTarget;
         entry.originalSize = item.data.size(); entry.data.assign(item.data.begin(), item.data.end());
         entries.push_back(std::move(entry));

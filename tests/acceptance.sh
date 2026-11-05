@@ -35,29 +35,6 @@ case "${command_name}" in
   compare)
     exec "${python_cmd[@]}" "${script_dir}/acceptance_compare.py" "$@"
     ;;
-  remote-e2e)
-    cli="${repo_root}/out/build-test/BackupToolTestCli"
-    server="${repo_root}/out/build-test/DBackupServer"
-    openssl="$(command -v openssl || true)"
-    if [[ ! -f "${cli}" || ! -f "${server}" ]]; then
-      echo "Build the development test programs first with: ./build.sh test" >&2
-      exit 2
-    fi
-    if [[ -z "${openssl}" ]]; then
-      echo "OpenSSL was not found; add openssl to PATH." >&2
-      exit 2
-    fi
-    exec "${python_cmd[@]}" "${script_dir}/acceptance_network_e2e.py" \
-      --server-exe "${server}" --test-cli "${cli}" --openssl "${openssl}" "$@"
-    ;;
-  server-smoke)
-    cli="${repo_root}/out/build-test/BackupToolTestCli"
-    if [[ ! -f "${cli}" ]]; then
-      echo "Build the development test programs first with: ./build.sh test" >&2
-      exit 2
-    fi
-    exec "${cli}" remote-client-test "$@"
-    ;;
   test-cli)
     cli="${repo_root}/out/build-test/BackupToolTestCli"
     if [[ ! -f "${cli}" ]]; then
@@ -72,14 +49,12 @@ DBackup development acceptance commands (run from any directory in Linux):
   tests/acceptance.sh generate --root /tmp/DBackup-Acceptance [--profile standard|stress] [--reset]
   tests/acceptance.sh self-test
   tests/acceptance.sh validate-catalog
-  tests/acceptance.sh run --case S4-REMOTE-001
+  tests/acceptance.sh run --case S1-PACK-001
   tests/acceptance.sh run --all
   tests/acceptance.sh test-cli --help
   tests/acceptance.sh fault-copy --root ROOT --kind archive-truncate --input FILE --output FILE
   tests/acceptance.sh hold-file --root ROOT --path FILE
   tests/acceptance.sh realtime-events --root ROOT
-  tests/acceptance.sh remote-e2e --root ROOT
-  tests/acceptance.sh server-smoke --root ROOT --server https://127.0.0.1:8443
 
 Other established commands are forwarded to tools/acceptance/acceptance.sh, including
 compare, manifest, prepare-links, prepare-permissions, inspect-repository, and cleanup.

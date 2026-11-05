@@ -15,6 +15,8 @@ struct Metadata {
     uint64_t inode = 0;
     uint64_t size = 0;
     uint64_t links = 0;
+    uint32_t deviceMajor = 0;
+    uint32_t deviceMinor = 0;
 };
 
 bool readMetadata(const std::filesystem::path &path, Metadata &metadata, std::string &error);

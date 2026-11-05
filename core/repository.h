@@ -13,6 +13,8 @@ struct SnapshotInfo {
     uint64_t fileCount = 0;
     uint64_t logicalBytes = 0;
     uint64_t storedBytes = 0;
+    bool partial = false;
+    std::vector<std::string> warnings;
 };
 
 struct SnapshotOptions {

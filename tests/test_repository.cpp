@@ -1,4 +1,5 @@
 #include "core/repository.h"
+#include "core/archive_internal.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
@@ -10,8 +11,8 @@
 namespace fs = std::filesystem;
 
 TEST(LinuxRepository, SnapshotsDeduplicateRestoreAndPrune) {
-    char name[] = "/tmp/dbackup-repository-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-repository-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root);
     fs::create_directory(base / "source");
@@ -37,8 +38,8 @@ TEST(LinuxRepository, SnapshotsDeduplicateRestoreAndPrune) {
 }
 
 TEST(LinuxRepository, DeletingSnapshotPreservesOtherSnapshot) {
-    char name[] = "/tmp/dbackup-repository-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-repository-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root);
     fs::create_directory(base / "source");
@@ -60,9 +61,47 @@ TEST(LinuxRepository, DeletingSnapshotPreservesOtherSnapshot) {
     fs::remove_all(base);
 }
 
+TEST(LinuxRepository, PreviewAndBackupModesApplyTheSamePathRules) {
+    std::string name = (fs::temp_directory_path() / "dbackup-filter-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
+    ASSERT_NE(root, nullptr);
+    const fs::path base(root), source = base / "source";
+    fs::create_directories(source / "docs/private");
+    std::ofstream(source / "docs/report.txt") << "selected";
+    std::ofstream(source / "docs/private/secret.txt") << "excluded";
+    FilterOptions filter;
+    filter.pathRules = {{true, "docs/*"}, {false, "docs/private/*"}};
+    BackupPreview preview;
+    std::string error;
+    ASSERT_TRUE(ArchiveService::preview({source.string()}, filter, preview, error)) << error;
+    EXPECT_EQ(preview.includedFiles, 1u);
+    PackOptions pack; pack.filter = filter;
+    const auto archive = (base / "backup.abk").string();
+    ASSERT_TRUE(ArchiveService::create(source.string(), archive, pack, error)) << error;
+    ASSERT_TRUE(ArchiveService::extract(archive, (base / "archive-output").string(), error)) << error;
+    EXPECT_TRUE(fs::exists(base / "archive-output/docs/report.txt"));
+    EXPECT_FALSE(fs::exists(base / "archive-output/docs/private/secret.txt"));
+    LocalRepository repository((base / "repo").string());
+    SnapshotOptions options; options.sources = {source.string()}; options.password = "test-only"; options.filter = filter;
+    SnapshotInfo snapshot;
+    ASSERT_TRUE(repository.createSnapshot(options, snapshot, error)) << error;
+    BackupPreview snapshotPreview;
+    ASSERT_TRUE(ArchiveService::preview({source.string()}, filter, snapshotPreview, error, true)) << error;
+    std::ifstream manifestFile(base / "repo/snapshots" / (snapshot.id + ".manifest"), std::ios::binary);
+    std::vector<uint8_t> manifestBytes{std::istreambuf_iterator<char>(manifestFile), {}};
+    std::vector<dbackup::archive_format::Entry> manifestEntries;
+    ASSERT_TRUE(dbackup::archive_format::decode(manifestBytes, "test-only", manifestEntries, error)) << error;
+    EXPECT_EQ(snapshotPreview.includedFiles + snapshotPreview.includedDirectories, manifestEntries.size());
+    EXPECT_EQ(snapshotPreview.includedFiles, preview.includedFiles);
+    ASSERT_TRUE(repository.restoreSnapshot(snapshot.id, (base / "snapshot-output").string(), "test-only", error)) << error;
+    EXPECT_TRUE(fs::exists(base / "snapshot-output/source/docs/report.txt"));
+    EXPECT_FALSE(fs::exists(base / "snapshot-output/source/docs/private/secret.txt"));
+    fs::remove_all(base);
+}
+
 TEST(LinuxRepository, RejectsOldConfigAndPreservesExistingData) {
-    char name[] = "/tmp/dbackup-repository-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-repository-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root);
     std::ofstream(base / "config.bin", std::ios::binary) << "DBR1old-data";
@@ -75,8 +114,8 @@ TEST(LinuxRepository, RejectsOldConfigAndPreservesExistingData) {
 }
 
 TEST(LinuxRepository, CorruptedRetainedManifestPreventsPruning) {
-    char name[] = "/tmp/dbackup-repository-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-repository-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root);
     fs::create_directory(base / "source");
@@ -94,8 +133,8 @@ TEST(LinuxRepository, CorruptedRetainedManifestPreventsPruning) {
 }
 
 TEST(LinuxRepository, PruneWaitsForConcurrentRepositoryOperation) {
-    char name[] = "/tmp/dbackup-repository-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-repository-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root), config = base / "repo/config.bin";
     LocalRepository repository((base / "repo").string());
@@ -114,8 +153,8 @@ TEST(LinuxRepository, PruneWaitsForConcurrentRepositoryOperation) {
 }
 
 TEST(LinuxRepository, RefusesSymlinkedChunkDirectory) {
-    char name[] = "/tmp/dbackup-repository-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-repository-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root), repositoryRoot = base / "repo";
     fs::create_directory(base / "source");

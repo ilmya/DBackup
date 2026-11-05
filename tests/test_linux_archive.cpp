@@ -8,8 +8,8 @@
 namespace fs = std::filesystem;
 
 TEST(LinuxArchive, EncryptedRoundTripWithLinksAndFilter) {
-    char name[] = "/tmp/dbackup-archive-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-archive-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root), source = base / "source";
     fs::create_directories(source / "empty");

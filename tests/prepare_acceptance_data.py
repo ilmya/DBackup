@@ -71,8 +71,6 @@ def compact_standard(root: Path) -> None:
             "S2-COMP-002": ["fixtures/compression/random-4m.bin"],
             "S2-FILTER-COMB-001": ["fixtures/filters"],
             "S5-INCR-001": ["fixtures/incremental"],
-            "S4-REMOTE-001": ["fixtures/network/alice"],
-            "S4-AUTH-003": ["fixtures/network/alice", "fixtures/network/bob"],
         },
     })
 

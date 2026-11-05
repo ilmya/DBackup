@@ -36,22 +36,9 @@ def main() -> int:
 
 
 def expected_source_manifest_with_original(sources: list[str], original) -> dict:
-    expected = original(sources)
-    if len(sources) != 1:
-        return expected
-    source = Path(sources[0])
-    if tool.entry_type(source, tool.get_attributes(source)) != "directory":
-        return expected
-    prefix = source.name
-    entries = []
-    for entry in expected["entries"]:
-        if entry["path"] == prefix:
-            continue
-        if entry["path"].startswith(prefix + "/"):
-            entries.append({**entry, "path": entry["path"][len(prefix) + 1:]})
-        else:
-            entries.append(entry)
-    return {**expected, "entries": entries}
+    if len(sources) == 1 and Path(sources[0]).is_dir() and not Path(sources[0]).is_symlink():
+        return tool.build_manifest(Path(sources[0]))
+    return original(sources)
 
 
 if __name__ == "__main__":

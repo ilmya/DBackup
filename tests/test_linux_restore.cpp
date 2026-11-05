@@ -22,8 +22,8 @@ Entry item(std::string name, int type, mode_t mode) {
 }
 
 TEST(LinuxRestore, RestoresFilesAndLinks) {
-    char name[] = "/tmp/dbackup-restore-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-restore-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     Entry dir = item("dir", 1, 0750), file = item("dir/data", 0, 0640);
     file.data = {'a', 'b', 'c'};
@@ -44,8 +44,8 @@ TEST(LinuxRestore, RestoresFilesAndLinks) {
 }
 
 TEST(LinuxRestore, RejectsEscapesAndExistingSymlinkParents) {
-    char name[] = "/tmp/dbackup-restore-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-restore-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root), destination = base / "output", outside = base / "outside";
     fs::create_directories(destination);
@@ -60,5 +60,26 @@ TEST(LinuxRestore, RejectsEscapesAndExistingSymlinkParents) {
     EXPECT_FALSE(dbackup::archive_restore::restore({traversal}, destination, {}, error));
     Entry link = item("bad", 2, 0777); link.file.linkTarget = "../../outside";
     EXPECT_FALSE(dbackup::archive_restore::restore({link}, destination, {}, error));
+    fs::remove_all(base);
+}
+
+TEST(LinuxRestore, SkipsPermissionFailuresAndKeepsOtherContent) {
+    if (geteuid() == 0) GTEST_SKIP() << "需要非 root 用户";
+    std::string name = (fs::temp_directory_path() / "dbackup-permission-XXXXXX").string();
+    const char *root = mkdtemp(name.data()); ASSERT_NE(root, nullptr);
+    const fs::path base(root), output = base / "output";
+    fs::create_directories(output / "blocked");
+    ASSERT_EQ(chmod((output / "blocked").c_str(), 0500), 0);
+    Entry blocked = item("blocked/file", 0, 0640); blocked.data = {'n', 'o'};
+    Entry other = item("other", 0, 0640); other.data = {'o', 'k'};
+    other.file.metadata.uid = 65534;
+    std::string error;
+    ASSERT_TRUE(dbackup::archive_restore::restore({blocked, other}, output, {}, error)) << error;
+    EXPECT_NE(error.find("blocked"), std::string::npos);
+    EXPECT_NE(error.find("other"), std::string::npos);
+    EXPECT_FALSE(fs::exists(output / "blocked/file"));
+    std::ifstream input(output / "other");
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}), "ok");
+    chmod((output / "blocked").c_str(), 0700);
     fs::remove_all(base);
 }

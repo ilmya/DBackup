@@ -39,10 +39,23 @@ case "$command_name" in
           exit 1
         fi
       done
+      demo_root="${DBACKUP_DEMO_ROOT:-${HOME}/DBackup-Demo}"
+      python3 "$root/tests/demo.py" prepare --root "$demo_root"
+      if [[ -L "$demo_root/automation" || -L "$demo_root/tmp" || ! -d "$demo_root/tmp" ]]; then
+        printf '测试目录无效或包含符号链接: %s\n' "$demo_root" >&2
+        exit 1
+      fi
+      mkdir -p "$demo_root/automation"
+      export TMPDIR="$demo_root/tmp"
+      export DBACKUP_TEST_DATA_ROOT="${DBACKUP_TEST_DATA_ROOT:-$demo_root/automation/acceptance-data}"
+      export DBACKUP_TEST_TEMP_ROOT="${DBACKUP_TEST_TEMP_ROOT:-$demo_root/automation/selftest-temp}"
     fi
+    cmake_options=()
+    if [[ -n "${DBACKUP_TEST_DATA_ROOT:-}" ]]; then cmake_options+=("-DDBACKUP_TEST_DATA_ROOT=$DBACKUP_TEST_DATA_ROOT"); fi
+    if [[ -n "${DBACKUP_TEST_TEMP_ROOT:-}" ]]; then cmake_options+=("-DDBACKUP_TEST_TEMP_ROOT=$DBACKUP_TEST_TEMP_ROOT"); fi
     cmake -S "$root" -B "$build_dir" -G Ninja \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$qt_prefix" \
-      -DBUILD_TESTS=ON -DDBACKUP_BUILD_TEST_CLI=ON
+      -DBUILD_TESTS=ON -DDBACKUP_BUILD_TEST_CLI=ON "${cmake_options[@]}"
     cmake --build "$build_dir" --parallel "${DBACKUP_JOBS:-2}"
     if [[ "$command_name" == test ]]; then
       bash "$root/tests/run_in_test_keyring.sh" ctest --test-dir "$build_dir" --output-on-failure

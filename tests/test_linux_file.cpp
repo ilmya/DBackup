@@ -15,8 +15,8 @@ TEST(LinuxFile, RelativePathsRejectTraversal) {
 }
 
 TEST(LinuxFile, DirectoryCreationRejectsSymlinkTraversal) {
-    char name[] = "/tmp/dbackup-file-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-file-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path base(root);
     std::string error;
@@ -28,8 +28,8 @@ TEST(LinuxFile, DirectoryCreationRejectsSymlinkTraversal) {
 }
 
 TEST(LinuxFile, MetadataPreservesModeAndTime) {
-    char name[] = "/tmp/dbackup-file-test-XXXXXX";
-    const char *root = mkdtemp(name);
+    std::string name = (std::filesystem::temp_directory_path() / "dbackup-file-test-XXXXXX").string();
+    const char *root = mkdtemp(name.data());
     ASSERT_NE(root, nullptr);
     fs::path file = fs::path(root) / "item";
     std::ofstream(file) << "test";

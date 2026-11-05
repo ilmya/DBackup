@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <chrono>
 #include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -17,13 +18,13 @@ DirectoryWatcher::DirectoryWatcher() = default;
 DirectoryWatcher::~DirectoryWatcher() { stop(); }
 
 bool DirectoryWatcher::start(const std::string &path, Callback callback, std::string &error,
-                             unsigned debounceMs, unsigned maximumDelayMs, StatusCallback statusCallback) {
+                             unsigned debounceMs, unsigned maximumDelayMs, StatusCallback statusCallback, bool recursive) {
     stop();
     if (path.empty() || !callback) { error = "监控目录和事件回调不能为空"; return false; }
     std::error_code ec;
     if (fs::exists(path, ec) && !fs::is_directory(path, ec)) { error = "实时监控来源必须是目录: " + path; return false; }
     path_ = path; callback_ = std::move(callback); statusCallback_ = std::move(statusCallback);
-    debounceMs_ = debounceMs; maximumDelayMs_ = maximumDelayMs;
+    debounceMs_ = debounceMs; maximumDelayMs_ = maximumDelayMs; recursive_ = recursive;
     error.clear(); running_ = true; worker_ = std::thread(&DirectoryWatcher::run, this); return true;
 }
 
@@ -52,16 +53,32 @@ void DirectoryWatcher::run() {
             return wd >= 0;
         };
         bool ok = add(path_);
-        for (fs::recursive_directory_iterator it(path_, fs::directory_options::skip_permission_denied, ec), end;
-             ok && !ec && it != end; it.increment(ec)) {
-            if (it->is_directory(ec) && !it->is_symlink(ec)) ok = add(it->path());
+        std::string partial;
+        if (recursive_) {
+            std::vector<fs::path> pending{path_};
+            while(ok && !pending.empty()) {
+                const auto current=pending.back();pending.pop_back();
+                std::error_code walkError;
+                fs::directory_iterator it(current,walkError),end;
+                if(walkError){if(partial.empty())partial=current.string()+": "+walkError.message();continue;}
+                for(;it!=end;it.increment(walkError)) {
+                    if(walkError)break;
+                    std::error_code typeError;
+                    if(it->is_directory(typeError) && !it->is_symlink(typeError)) {
+                        if(add(it->path()))pending.push_back(it->path());
+                        else if(partial.empty())partial=it->path().string()+": "+std::strerror(errno);
+                    }
+                    if(typeError && partial.empty())partial=it->path().string()+": "+typeError.message();
+                }
+                if(walkError && partial.empty())partial=current.string()+": "+walkError.message();
+            }
         }
         if (!ok || ec) {
             close(fd);
             if (!unavailable && statusCallback_) statusCallback_(false, "无法监控目录，将自动重试: " + path_);
             unavailable = true; std::this_thread::sleep_for(std::chrono::milliseconds(250)); continue;
         }
-        if (statusCallback_) statusCallback_(true, unavailable ? "监控目录已恢复" : "监控目录运行正常");
+        if (statusCallback_) statusCallback_(true, partial.empty() ? (unavailable ? "监控目录已恢复" : "监控目录运行正常") : "部分目录无法监控: "+partial);
         if (unavailable) callback_({}, true);
         unavailable = false;
         std::set<std::string> changes;
@@ -85,14 +102,15 @@ void DirectoryWatcher::run() {
                         if (changes.empty()) first = Clock::now();
                         last = Clock::now();
                         changes.insert(changed.lexically_relative(path_).generic_string());
-                        if ((event->mask & IN_ISDIR) && (event->mask & (IN_CREATE | IN_MOVED_TO))) {
-                            if (!add(changed)) reconnect = true;
+                        if (!partial.empty() && (event->mask & IN_ATTRIB)) { reconnect=true; rescan=true; }
+                        if (recursive_ && (event->mask & IN_ISDIR) && (event->mask & (IN_CREATE | IN_MOVED_TO))) {
+                            if (!add(changed)) { if(statusCallback_)statusCallback_(true,"部分目录无法监控: "+changed.string()+": "+std::strerror(errno)); }
                             std::error_code walkError;
                             for (fs::recursive_directory_iterator it(changed, fs::directory_options::skip_permission_denied, walkError), end;
                                  !walkError && it != end; it.increment(walkError)) {
-                                if (it->is_directory(walkError) && !it->is_symlink(walkError) && !add(it->path())) reconnect = true;
+                                if (it->is_directory(walkError) && !it->is_symlink(walkError) && !add(it->path())) { if(statusCallback_)statusCallback_(true,"部分目录无法监控: "+it->path().string()+": "+std::strerror(errno)); }
                             }
-                            if (walkError) reconnect = true;
+                            if (walkError && statusCallback_) statusCallback_(true,"部分目录无法监控: "+changed.string()+": "+walkError.message());
                             rescan = true;
                         }
                         if (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) {

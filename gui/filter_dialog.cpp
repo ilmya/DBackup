@@ -49,7 +49,7 @@ FilterDialog::FilterDialog(const FilterOptions &options, QWidget *parent) : QDia
     setWindowTitle(tr("筛选规则"));
     setMinimumSize(720, 590);
     auto *root = new QVBoxLayout(this);
-    auto *intro = new QLabel(tr("仅备份符合全部基础条件的项目；排除规则始终优先。通配符支持 * 和 ?。"));
+    auto *intro = new QLabel(tr("条件同时生效；排除优先。支持 * 和 ?。"));
     intro->setProperty("muted", true);
     intro->setWordWrap(true);
     root->addWidget(intro);
@@ -113,8 +113,8 @@ FilterDialog::FilterDialog(const FilterOptions &options, QWidget *parent) : QDia
     beforeDate_->setCalendarPopup(true);
     afterEnabled_->setChecked(options.afterMtimeMs != 0);
     beforeEnabled_->setChecked(options.beforeMtimeMs != 0);
-    if (options.afterMtimeMs) afterDate_->setDate(QDateTime::fromMSecsSinceEpoch(options.afterMtimeMs, QTimeZone::UTC).date());
-    if (options.beforeMtimeMs) beforeDate_->setDate(QDateTime::fromMSecsSinceEpoch(options.beforeMtimeMs, QTimeZone::UTC).date());
+    if (options.afterMtimeMs) afterDate_->setDate(QDateTime::fromMSecsSinceEpoch(options.afterMtimeMs, QTimeZone::systemTimeZone()).date());
+    if (options.beforeMtimeMs) beforeDate_->setDate(QDateTime::fromMSecsSinceEpoch(options.beforeMtimeMs, QTimeZone::systemTimeZone()).date());
     afterDate_->setEnabled(afterEnabled_->isChecked());
     beforeDate_->setEnabled(beforeEnabled_->isChecked());
     connect(afterEnabled_, &QCheckBox::toggled, afterDate_, &QWidget::setEnabled);
@@ -172,14 +172,9 @@ FilterDialog::FilterDialog(const FilterOptions &options, QWidget *parent) : QDia
     buttons->button(QDialogButtonBox::Ok)->setProperty("primary", true);
     buttons->button(QDialogButtonBox::RestoreDefaults)->setText(tr("清空全部"));
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        const uint64_t minimum = static_cast<uint64_t>(minSize_->value()) * unitMultiplier(minUnit_->currentIndex());
-        const uint64_t maximum = static_cast<uint64_t>(maxSize_->value()) * unitMultiplier(maxUnit_->currentIndex());
-        if (maximum && minimum > maximum) {
-            QMessageBox::warning(this, tr("筛选条件无效"), tr("最小文件大小不能大于最大文件大小。"));
-            return;
-        }
-        if (afterEnabled_->isChecked() && beforeEnabled_->isChecked() && afterDate_->date() > beforeDate_->date()) {
-            QMessageBox::warning(this, tr("筛选条件无效"), tr("开始日期不能晚于结束日期。"));
+        std::string error;
+        if (!ValidateFilterOptions(this->options(), error)) {
+            QMessageBox::warning(this, tr("筛选条件无效"), QString::fromUtf8(error.c_str()));
             return;
         }
         accept();
@@ -212,8 +207,8 @@ FilterOptions FilterDialog::options() const {
         result.extensions.push_back(value.trimmed().toUtf8().toStdString());
     result.minSize = static_cast<uint64_t>(minSize_->value()) * unitMultiplier(minUnit_->currentIndex());
     result.maxSize = static_cast<uint64_t>(maxSize_->value()) * unitMultiplier(maxUnit_->currentIndex());
-    if (afterEnabled_->isChecked()) result.afterMtimeMs = QDateTime(afterDate_->date(), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
-    if (beforeEnabled_->isChecked()) result.beforeMtimeMs = QDateTime(beforeDate_->date(), QTime(23, 59, 59, 999), QTimeZone::UTC).toMSecsSinceEpoch();
+    if (afterEnabled_->isChecked()) result.afterMtimeMs = QDateTime(afterDate_->date(), QTime(0, 0), QTimeZone::systemTimeZone()).toMSecsSinceEpoch();
+    if (beforeEnabled_->isChecked()) result.beforeMtimeMs = QDateTime(beforeDate_->date(), QTime(23, 59, 59, 999), QTimeZone::systemTimeZone()).toMSecsSinceEpoch();
     for (const QString &line : ruleLines(includeRules_)) result.pathRules.push_back({true, line.toUtf8().toStdString()});
     for (const QString &line : ruleLines(excludeRules_)) result.pathRules.push_back({false, line.toUtf8().toStdString()});
     auto exclude = [&](const char *pattern) { result.pathRules.push_back({false, pattern}); };

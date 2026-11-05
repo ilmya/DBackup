@@ -15,7 +15,7 @@ struct Entry {
     linux_file::Metadata metadata;
     std::string owner;
     std::string linkTarget;
-    // 0 regular file, 1 directory, 2 symbolic link, 3 hard link.
+    // 0 regular, 1 directory, 2 symbolic link, 3 hard link, 4 FIFO, 5 character, 6 block, 7 socket.
     uint8_t type = 0;
 };
 
@@ -43,6 +43,10 @@ bool encode(const std::vector<Entry> &entries, int compressionLevel, const std::
             std::vector<uint8_t> &output, std::string &error);
 bool decode(const std::vector<uint8_t> &input, const std::string &password,
             std::vector<Entry> &entries, std::string &error);
+bool encodeCurrent(const std::vector<Entry> &entries, const PackOptions &options,
+                   std::vector<uint8_t> &output, std::string &error);
+bool decodeCurrent(const std::vector<uint8_t> &input, const std::string &password,
+                   std::vector<Entry> &entries, std::string &error);
 
 }  // namespace dbackup::archive_format
 

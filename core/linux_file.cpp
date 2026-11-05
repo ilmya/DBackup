@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 namespace dbackup::linux_file {
@@ -26,6 +27,8 @@ bool readMetadata(const fs::path &path, Metadata &metadata, std::string &error) 
     metadata.inode = info.st_ino;
     metadata.size = info.st_size;
     metadata.links = info.st_nlink;
+    metadata.deviceMajor = (S_ISCHR(info.st_mode) || S_ISBLK(info.st_mode)) ? major(info.st_rdev) : 0;
+    metadata.deviceMinor = (S_ISCHR(info.st_mode) || S_ISBLK(info.st_mode)) ? minor(info.st_rdev) : 0;
     return true;
 }
 
@@ -37,6 +40,14 @@ bool restoreMetadata(const fs::path &path, const Metadata &metadata, bool symlin
     if (times[1].tv_nsec < 0) { --times[1].tv_sec; times[1].tv_nsec += 1000000000; }
     if (utimensat(AT_FDCWD, path.c_str(), times, symlink ? AT_SYMLINK_NOFOLLOW : 0) != 0)
         return fail(path, error);
+    struct stat actual{};
+    if (lstat(path.c_str(), &actual) != 0) return fail(path, error);
+    const int64_t actualMtime = int64_t(actual.st_mtim.tv_sec) * 1000000000LL + actual.st_mtim.tv_nsec;
+    if (actual.st_uid != metadata.uid || actual.st_gid != metadata.gid ||
+        (!symlink && (actual.st_mode & 07777) != (metadata.mode & 07777)) || actualMtime != metadata.mtimeNs) {
+        error = path.string() + ": 目标文件系统未完整保留属主、权限或修改时间";
+        return false;
+    }
     return true;
 }
 
