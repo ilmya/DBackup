@@ -32,25 +32,6 @@ bool readMetadata(const fs::path &path, Metadata &metadata, std::string &error) 
     return true;
 }
 
-bool restoreMetadata(const fs::path &path, const Metadata &metadata, bool symlink, std::string &error) {
-    if (lchown(path.c_str(), metadata.uid, metadata.gid) != 0) return fail(path, error);
-    if (!symlink && chmod(path.c_str(), metadata.mode & 07777) != 0) return fail(path, error);
-    timespec times[2]{{0, UTIME_OMIT}, {metadata.mtimeNs / 1000000000LL,
-                                        metadata.mtimeNs % 1000000000LL}};
-    if (times[1].tv_nsec < 0) { --times[1].tv_sec; times[1].tv_nsec += 1000000000; }
-    if (utimensat(AT_FDCWD, path.c_str(), times, symlink ? AT_SYMLINK_NOFOLLOW : 0) != 0)
-        return fail(path, error);
-    struct stat actual{};
-    if (lstat(path.c_str(), &actual) != 0) return fail(path, error);
-    const int64_t actualMtime = int64_t(actual.st_mtim.tv_sec) * 1000000000LL + actual.st_mtim.tv_nsec;
-    if (actual.st_uid != metadata.uid || actual.st_gid != metadata.gid ||
-        (!symlink && (actual.st_mode & 07777) != (metadata.mode & 07777)) || actualMtime != metadata.mtimeNs) {
-        error = path.string() + ": 目标文件系统未完整保留属主、权限或修改时间";
-        return false;
-    }
-    return true;
-}
-
 bool validRelativePath(const fs::path &path) {
     if (path.empty() || path.is_absolute()) return false;
     for (const auto &part : path) {
@@ -86,8 +67,4 @@ bool ensureDirectories(const fs::path &path, std::string &error) {
     return true;
 }
 
-bool atomicReplace(const fs::path &temporary, const fs::path &destination, std::string &error) {
-    if (rename(temporary.c_str(), destination.c_str()) != 0) return fail(destination, error);
-    return true;
-}
 }  // namespace dbackup::linux_file

@@ -11,8 +11,8 @@ inline QString styleSheet() {
         QLabel#pageTitle { font-size: 19px; font-weight: 700; color: #0f172a; }
         QGroupBox { background: white; border: 1px solid #e2e8f0; border-radius: 7px; margin-top: 9px; }
         QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #334155; font-weight: 600; }
-        QLineEdit, QComboBox, QSpinBox, QDateEdit, QListWidget, QTreeView, QPlainTextEdit { background: white; border: 1px solid #a8b7ca; border-radius: 5px; padding: 3px; }
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus, QListWidget:focus, QPlainTextEdit:focus { border-color: #2563eb; }
+        QLineEdit, QComboBox, QSpinBox, QDateEdit, QTreeView, QPlainTextEdit { background: white; border: 1px solid #a8b7ca; border-radius: 5px; padding: 3px; }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus, QPlainTextEdit:focus { border-color: #2563eb; }
         QPushButton { background: #f8fafc; border: 1px solid #94a3b8; border-radius: 5px; padding: 4px 10px; }
         QPushButton:hover { background: #eff6ff; border-color: #2563eb; color: #1d4ed8; }
         QPushButton:pressed { background: #dbeafe; }

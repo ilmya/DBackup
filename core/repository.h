@@ -24,32 +24,18 @@ struct SnapshotOptions {
     uint32_t chunkSize = 4u * 1024u * 1024u;
 };
 
-class IBackupRepository {
- public:
-    virtual ~IBackupRepository() = default;
-    virtual bool initialize(const std::string &password, std::string &error) = 0;
-    virtual bool createSnapshot(const SnapshotOptions &options, SnapshotInfo &snapshot,
-                                std::string &error, const OperationContext &context = {}) = 0;
-    virtual bool listSnapshots(std::vector<SnapshotInfo> &snapshots, std::string &error) = 0;
-    virtual bool restoreSnapshot(const std::string &id, const std::string &destination,
-                                 const std::string &password, std::string &error,
-                                 const OperationContext &context = {}) = 0;
-    virtual bool deleteSnapshot(const std::string &id, std::string &error) = 0;
-    virtual bool prune(size_t keepLatest, std::string &error) = 0;
-};
-
-class LocalRepository final : public IBackupRepository {
+class LocalRepository final {
  public:
     explicit LocalRepository(std::string root);
-    bool initialize(const std::string &password, std::string &error) override;
+    bool initialize(const std::string &password, std::string &error);
     bool createSnapshot(const SnapshotOptions &options, SnapshotInfo &snapshot,
-                        std::string &error, const OperationContext &context = {}) override;
-    bool listSnapshots(std::vector<SnapshotInfo> &snapshots, std::string &error) override;
+                        std::string &error, const OperationContext &context = {});
+    bool listSnapshots(std::vector<SnapshotInfo> &snapshots, std::string &error);
     bool restoreSnapshot(const std::string &id, const std::string &destination,
                          const std::string &password, std::string &error,
-                         const OperationContext &context = {}) override;
-    bool deleteSnapshot(const std::string &id, std::string &error) override;
-    bool prune(size_t keepLatest, std::string &error) override;
+                         const OperationContext &context = {});
+    bool deleteSnapshot(const std::string &id, std::string &error);
+    bool prune(size_t keepLatest, std::string &error);
 
  private:
     std::string root_;

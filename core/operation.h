@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-enum class OperationStage { Scanning, Reading, Compressing, Encrypting, Writing, Uploading, Downloading, Restoring, Completed };
+enum class OperationStage { Scanning, Reading, Compressing, Encrypting, Writing, Restoring, Completed };
 
 struct OperationProgress {
     OperationStage stage = OperationStage::Scanning;

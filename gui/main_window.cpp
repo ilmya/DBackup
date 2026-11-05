@@ -18,11 +18,9 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QInputDialog>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -87,8 +85,6 @@ QString stageName(OperationStage stage) {
     case OperationStage::Compressing: return QObject::tr("正在压缩");
     case OperationStage::Encrypting: return QObject::tr("正在加密");
     case OperationStage::Writing: return QObject::tr("正在写入");
-    case OperationStage::Uploading: return QObject::tr("正在上传");
-    case OperationStage::Downloading: return QObject::tr("正在下载");
     case OperationStage::Restoring: return QObject::tr("正在恢复");
     case OperationStage::Completed: return QObject::tr("已完成");
     }
@@ -165,15 +161,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             else result.detail=error;
             const bool ok=result.success;
             error=result.detail;
-            SnapshotInfo info;info.partial=result.partial;
-            QMetaObject::invokeMethod(this, [this, job, ok, error, info, cancel] {
+            QMetaObject::invokeMethod(this, [this, job, ok, error, result, cancel] {
                 const bool cancelled=!ok && cancel->load();planCancellations_.remove(job.id);
                 const QString detail=QString::fromUtf8(error.c_str());
                 QString recent=detail;
-                if(job.realtimeTriggered && ok)recent=realtimeResultDetail(job,detail,info.partial);
-                jobs_->markFinished(job.id, ok, recent, info.partial, cancelled);
-                appendLog(ok ? (info.partial ? tr("计划“%1”部分完成：%2").arg(job.name, QString::fromUtf8(error.c_str())) : tr("计划“%1”完成：%2").arg(job.name, QString::fromUtf8(error.c_str())))
-                             : (cancelled?tr("计划“%1”已取消：%2"):tr("计划“%1”失败：%2")).arg(job.name, QString::fromUtf8(error.c_str())), !ok || info.partial);
+                if(job.realtimeTriggered && ok)recent=realtimeResultDetail(job,detail,result.partial);
+                jobs_->markFinished(job.id, ok, recent, result.partial, cancelled);
+                appendLog(ok ? (result.partial ? tr("计划“%1”部分完成：%2").arg(job.name, QString::fromUtf8(error.c_str())) : tr("计划“%1”完成：%2").arg(job.name, QString::fromUtf8(error.c_str())))
+                             : (cancelled?tr("计划“%1”已取消：%2"):tr("计划“%1”失败：%2")).arg(job.name, QString::fromUtf8(error.c_str())), !ok || result.partial);
             }, Qt::QueuedConnection);
         });
         connect(worker, &QThread::finished, worker, &QObject::deleteLater); worker->start();
@@ -416,7 +411,7 @@ QWidget *MainWindow::createSettingsPage() {
 }
 
 void MainWindow::updateSourceSummary() { sourceSummary_->setText(tr("已选择 %1 个来源").arg(sourceModel_->roots().size())); previewSummary_->setText(tr("选择已更改，请重新扫描")); }
-void MainWindow::chooseBackupTarget() {if(backupOptions_->incremental()){QString path=QFileDialog::getExistingDirectory(this,tr("选择或创建增量仓库目录"));if(!path.isEmpty())backupTarget_->setText(path);return;} const PackOptions options=backupOptions_->options();bool plainTar=options.format==PackFormat::Tar&&options.compression==Compression::None&&!backupOptions_->encryptionEnabled();QString suffix=plainTar?".tar":".abk";QString path=QFileDialog::getSaveFileName(this,tr("保存备份归档"),{},plainTar?tr("Tar 归档 (*.tar)"):tr("DBackup 归档 (*.abk)"));if(!path.isEmpty()){if(!path.endsWith(suffix,Qt::CaseInsensitive))path+=suffix;backupTarget_->setText(path);}}
+void MainWindow::chooseBackupTarget() {const PackOptions options=backupOptions_->options();bool plainTar=options.format==PackFormat::Tar&&options.compression==Compression::None&&!backupOptions_->encryptionEnabled();QString suffix=plainTar?".tar":".abk";QString path=QFileDialog::getSaveFileName(this,tr("保存备份归档"),{},plainTar?tr("Tar 归档 (*.tar)"):tr("DBackup 归档 (*.abk)"));if(!path.isEmpty()){if(!path.endsWith(suffix,Qt::CaseInsensitive))path+=suffix;backupTarget_->setText(path);}}
 void MainWindow::chooseArchive() { const QString path = QFileDialog::getOpenFileName(this, tr("选择备份归档"), {}, tr("备份归档 (*.abk *.tar);;所有文件 (*)")); if (!path.isEmpty()) archivePath_->setText(path); }
 void MainWindow::chooseRestoreFolder() { const QString path = QFileDialog::getExistingDirectory(this, tr("选择恢复目录")); if (!path.isEmpty()) restoreTarget_->setText(path); }
 
@@ -437,8 +432,7 @@ void MainWindow::previewFilters() {
     if (busy_) return;
     const auto sources = sourcePaths(); if (sources.empty()) { QMessageBox::information(this, tr("扫描预览"), tr("请先添加至少一个备份来源。")); return; }
     setBusy(true, tr("正在扫描文件元数据…")); FilterOptions filters = filters_; filters.sourceRules = sourceModel_->rules();
-    const bool incremental = backupOptions_->incremental();
-    QThread *worker = QThread::create([this, sources, filters, incremental] {
+    QThread *worker = QThread::create([this, sources, filters] {
         BackupPreview preview; std::string error; const bool ok = ArchiveService::preview(sources, filters, preview, error, true);
         QMetaObject::invokeMethod(this, [this, ok, preview, error] {
             setBusy(false); if (!ok) { QMessageBox::warning(this, tr("预览失败"), QString::fromUtf8(error.c_str())); appendLog(tr("扫描预览失败：%1").arg(QString::fromUtf8(error.c_str())), true); return; }
@@ -456,19 +450,18 @@ void MainWindow::startBackup() {
     if (busy_) return;
     const auto sources = sourcePaths(); const QString target = backupTarget_->text().trimmed();
     if (sources.empty() || target.isEmpty()) { QMessageBox::information(this, tr("无法开始备份"), tr("请添加备份来源并选择归档保存位置。")); return; }
-    const bool incremental=backupOptions_->incremental();PackOptions options=backupOptions_->options();options.filter=filters_;options.filter.sourceRules=sourceModel_->rules();
-    if(!incremental){
+    PackOptions options=backupOptions_->options();options.filter=filters_;options.filter.sourceRules=sourceModel_->rules();
+    {
         const bool plainTar=options.format==PackFormat::Tar && options.compression==Compression::None && !backupOptions_->encryptionEnabled();
         if(plainTar && target.endsWith(".abk",Qt::CaseInsensitive)){QMessageBox::warning(this,tr("文件名与格式不一致"),tr("当前输出为标准 tar，请重新选择 .tar 保存路径。"));return;}
         if(!plainTar && target.endsWith(".tar",Qt::CaseInsensitive)){QMessageBox::warning(this,tr("文件名与格式不一致"),tr("当前输出为 DBackup 封装（.abk）；tar 只是不压缩、不加密时的外部格式。请重新选择保存路径。"));return;}
     }
-    if(!incremental&&backupOptions_->encryptionEnabled()&&options.password.empty()){QMessageBox::information(this,tr("需要加密密码"),tr("使用 AES 加密时请输入密码。"));return;}
-    if(incremental&&options.password.empty()){QMessageBox::information(this,tr("需要仓库密码"),tr("增量仓库必须设置密码，以保护数据块和快照清单。"));return;}
+    if(backupOptions_->encryptionEnabled()&&options.password.empty()){QMessageBox::information(this,tr("需要加密密码"),tr("使用 AES 加密时请输入密码。"));return;}
     cancelled_=false;setBusy(true, tr("正在创建备份归档…")); appendLog(tr("开始备份到 %1").arg(target));
-    QThread *worker = QThread::create([this, sources, target, options,incremental] {
+    QThread *worker = QThread::create([this, sources, target, options] {
         OperationContext context;context.cancelled=&cancelled_;context.includeSourceDirectory=true;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);};
-        std::string error;bool ok=false;if(incremental){LocalRepository repository(target.toUtf8().toStdString());SnapshotOptions snapshot;snapshot.sources=sources;snapshot.password=options.password;snapshot.filter=options.filter;SnapshotInfo info;ok=repository.createSnapshot(snapshot,info,error,context);}else ok=ArchiveService::create(sources, target.toUtf8().toStdString(), options, error,context);
-        std::string digest,digestError;if(ok&&!incremental)dbackup::crypto::md5File(target.toUtf8().toStdString(),digest,digestError);
+        std::string error;const bool ok=ArchiveService::create(sources, target.toUtf8().toStdString(), options, error,context);
+        std::string digest,digestError;if(ok)dbackup::crypto::md5File(target.toUtf8().toStdString(),digest,digestError);
         QMetaObject::invokeMethod(this, [this, ok, target, error, digest, digestError] { setBusy(false); if (ok) { const bool partial=!error.empty();appendLog(partial?tr("备份部分完成：%1").arg(target):tr("备份完成：%1").arg(target),partial);QString message=tr("备份已写入：\n%1").arg(target);if(!digest.empty())message+=tr("\nMD5（仅供摘要展示）：%1").arg(QString::fromStdString(digest));else if(!digestError.empty())message+=tr("\nMD5 计算失败：%1").arg(QString::fromStdString(digestError));if(partial){appendLog(QString::fromUtf8(error.c_str()),true);message+=tr("\n\n跳过的项目：\n%1").arg(QString::fromUtf8(error.c_str()));QMessageBox::warning(this,tr("备份部分完成"),message);}else QMessageBox::information(this, tr("备份完成"), message); }
             else { appendLog(tr("备份失败：%1").arg(QString::fromUtf8(error.c_str())), true); QMessageBox::critical(this, tr("备份失败"), QString::fromUtf8(error.c_str())); } }, Qt::QueuedConnection);
     }); connect(worker, &QThread::finished, worker, &QObject::deleteLater); worker->start();

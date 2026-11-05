@@ -153,10 +153,9 @@ FilterDialog::FilterDialog(const FilterOptions &options, QWidget *parent) : QDia
     auto *common = new QGroupBox(tr("常用排除"));
     auto *commonLayout = new QHBoxLayout(common);
     temporary_ = new QCheckBox(tr("临时文件"));
-    cache_ = new QCheckBox(tr("系统缓存"));
     build_ = new QCheckBox(tr("编译输出"));
     logs_ = new QCheckBox(tr("日志文件"));
-    for (auto *box : {temporary_, cache_, build_, logs_}) commonLayout->addWidget(box);
+    for (auto *box : {temporary_, build_, logs_}) commonLayout->addWidget(box);
     commonLayout->addStretch();
     rulesLayout->addWidget(common);
     auto *editors = new QHBoxLayout;
@@ -195,7 +194,7 @@ FilterDialog::FilterDialog(const FilterOptions &options, QWidget *parent) : QDia
         pathEdit_->clear(); nameEdit_->clear(); extensionsEdit_->clear(); ownerEdit_->clear();
         entryType_->setCurrentIndex(0); minSize_->setValue(0); maxSize_->setValue(0);
         afterEnabled_->setChecked(false); beforeEnabled_->setChecked(false);
-        temporary_->setChecked(false); cache_->setChecked(false); build_->setChecked(false); logs_->setChecked(false);
+        temporary_->setChecked(false); build_->setChecked(false); logs_->setChecked(false);
         for (auto *type : fileTypes_) type->setChecked(true);
         includeRules_->clear(); excludeRules_->clear();
     });
@@ -227,7 +226,6 @@ FilterOptions FilterDialog::options() const {
     for (const QString &line : ruleLines(excludeRules_)) result.pathRules.push_back({false, line.toUtf8().toStdString()});
     auto exclude = [&](const char *pattern) { result.pathRules.push_back({false, pattern}); };
     if (temporary_->isChecked()) { exclude("*.tmp"); exclude("*.temp"); exclude("~*"); }
-    if (cache_->isChecked()) { exclude("*Thumbs.db"); exclude("*desktop.ini"); }
     if (build_->isChecked()) { for (const char *dir : {"node_modules", "build", "out", "target"}) {
         exclude((std::string(dir) + "/*").c_str()); exclude((std::string("*/") + dir + "/*").c_str()); } }
     if (logs_->isChecked()) exclude("*.log");

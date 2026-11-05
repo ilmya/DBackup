@@ -33,7 +33,6 @@ class FilterDialog final : public QDialog {
     QDateEdit *afterDate_ = nullptr;
     QDateEdit *beforeDate_ = nullptr;
     QCheckBox *temporary_ = nullptr;
-    QCheckBox *cache_ = nullptr;
     QCheckBox *build_ = nullptr;
     QCheckBox *logs_ = nullptr;
     std::array<QCheckBox *, 8> fileTypes_{};

@@ -136,8 +136,6 @@ QString operationStage(OperationStage stage) {
         case OperationStage::Compressing: return "compressing";
         case OperationStage::Encrypting: return "encrypting";
         case OperationStage::Writing: return "writing";
-        case OperationStage::Uploading: return "uploading";
-        case OperationStage::Downloading: return "downloading";
         case OperationStage::Restoring: return "restoring";
         case OperationStage::Completed: return "completed";
     }

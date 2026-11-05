@@ -1,4 +1,5 @@
 #include "core/linux_file.h"
+#include "core/archive.h"
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,9 +38,11 @@ TEST(LinuxFile, MetadataPreservesModeAndTime) {
     Metadata original, restored;
     std::string error;
     ASSERT_TRUE(readMetadata(file, original, error)) << error;
-    ASSERT_EQ(chmod(file.c_str(), 0600), 0);
-    ASSERT_TRUE(restoreMetadata(file, original, false, error)) << error;
-    ASSERT_TRUE(readMetadata(file, restored, error)) << error;
+    const auto archive = fs::path(root) / "backup.abk";
+    const auto destination = fs::path(root) / "restored";
+    ASSERT_TRUE(ArchiveService::create(file.string(), archive.string(), error)) << error;
+    ASSERT_TRUE(ArchiveService::extract(archive.string(), destination.string(), error)) << error;
+    ASSERT_TRUE(readMetadata(destination / "item", restored, error)) << error;
     EXPECT_EQ(restored.mode & 07777, 0640u);
     EXPECT_EQ(restored.mtimeNs, original.mtimeNs);
     EXPECT_EQ(restored.uid, original.uid);
