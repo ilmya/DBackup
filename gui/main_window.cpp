@@ -37,6 +37,7 @@
 #include <QTabBar>
 #include <QStatusBar>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QStyle>
 #include <QThread>
 #include <QUuid>
@@ -98,8 +99,8 @@ QString stageName(OperationStage stage) {
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle(tr("DBackup · 备份管理器"));
-    resize(1180, 760);
-    setMinimumSize(960, 650);
+    resize(920, 650);
+    setMinimumSize(860, 600);
     auto *root = new QWidget; root->setObjectName("appRoot");
     auto *layout = new QVBoxLayout(root); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(0);
     pages_ = new QStackedWidget;
@@ -126,11 +127,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     layout->addWidget(pages_, 1);
     setCentralWidget(root);
 
-    activityLog_ = new QPlainTextEdit; activityLog_->setReadOnly(true);
-    activityLog_->setPlaceholderText(tr("任务活动会显示在这里")); activityLog_->setFixedHeight(58);
-    auto *logDock = new QGroupBox(tr("活动日志")); auto *logLayout = new QVBoxLayout(logDock); logLayout->setContentsMargins(6, 5, 6, 6); logLayout->addWidget(activityLog_);
-    auto *dock = new QDockWidget; dock->setWidget(logDock); dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
+    activityLog_ = new QPlainTextEdit; activityLog_->setObjectName("activityLog"); activityLog_->setReadOnly(true);
+    activityLog_->setPlaceholderText(tr("任务活动会显示在这里")); activityLog_->setMinimumHeight(100);
+    auto *dock = new QDockWidget(tr("活动日志"), this); dock->setObjectName("activityLogDock"); dock->setWidget(activityLog_); dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
+    resizeDocks({dock}, {165}, Qt::Vertical);
+    menuBar()->addMenu(tr("视图"))->addAction(dock->toggleViewAction());
     progressDetails_ = new QLabel(tr("就绪")); progressDetails_->setMinimumWidth(260);
     progress_ = new QProgressBar; progress_->setRange(0, 100); progress_->setValue(0); progress_->setFixedWidth(180); progress_->setTextVisible(true);
     cancelButton_=button(tr("取消"));cancelButton_->setVisible(false);connect(cancelButton_,&QPushButton::clicked,this,[this]{cancelled_=true;statusBar()->showMessage(tr("正在取消…"));});
@@ -183,7 +185,7 @@ void MainWindow::closeEvent(QCloseEvent *event){if(quitting_){event->accept();re
 
 QWidget *MainWindow::createPageShell(const QString &title, QVBoxLayout **content) {
     auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
-    auto *page = new QWidget; auto *layout = new QVBoxLayout(page); layout->setContentsMargins(20, 10, 20, 10); layout->setSpacing(8);
+    auto *page = new QWidget; auto *layout = new QVBoxLayout(page); layout->setContentsMargins(14, 6, 14, 6); layout->setSpacing(5);
     auto *titleLabel = new QLabel(title); titleLabel->setObjectName("pageTitle");
     layout->addWidget(titleLabel); *content = layout; scroll->setWidget(page); return scroll;
 }
@@ -191,23 +193,33 @@ QWidget *MainWindow::createPageShell(const QString &title, QVBoxLayout **content
 QWidget *MainWindow::createBackupPage() {
     QVBoxLayout *layout = nullptr;
     QWidget *page = createPageShell(tr("新建备份"), &layout);
-    auto *columns = new QHBoxLayout;
-    columns->setSpacing(10);
+    auto *columns = new QSplitter(Qt::Horizontal); columns->setObjectName("backupColumns");
+    columns->setChildrenCollapsible(false); columns->setHandleWidth(6);
 
     auto *sources = new QGroupBox(tr("备份来源"));
     auto *sourceLayout = new QVBoxLayout(sources);
+    sourceLayout->setContentsMargins(7, 7, 7, 7); sourceLayout->setSpacing(4);
     sourceModel_ = new SourceTreeModel(this);
     sourceTree_ = createSourceTree(sourceModel_);
-    sourceTree_->setMinimumHeight(140);
+    sourceTree_->setObjectName("backupSourceTree");
+    sourceTree_->setHeaderHidden(false);
+    sourceTree_->showColumn(1); sourceTree_->showColumn(3);
+    sourceTree_->header()->setStretchLastSection(false);
+    sourceTree_->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    sourceTree_->header()->setSectionResizeMode(1, QHeaderView::Interactive);
+    sourceTree_->header()->setSectionResizeMode(3, QHeaderView::Interactive);
+    sourceTree_->setColumnWidth(0, 175); sourceTree_->setColumnWidth(1, 58); sourceTree_->setColumnWidth(3, 95);
+    sourceTree_->setMinimumHeight(110);
     sourceLayout->addWidget(sourceTree_, 1);
     sourceSummary_ = new QLabel(tr("勾选文件或文件夹"));
     sourceSummary_->setProperty("muted", true);
     sourceLayout->addWidget(sourceSummary_);
     connect(sourceModel_, &QAbstractItemModel::layoutChanged, this, [this] { updateSourceSummary(); });
-    columns->addWidget(sources, 2);
+    columns->addWidget(sources);
 
-    auto *target = new QGroupBox(tr("输出设置"));
+    auto *target = new QGroupBox(tr("输出设置")); target->setObjectName("backupOutputPanel");
     auto *targetLayout = new QVBoxLayout(target);
+    targetLayout->setContentsMargins(7, 7, 7, 7); targetLayout->setSpacing(4);
     auto *targetRow = new QHBoxLayout;
     backupTarget_ = new QLineEdit;
     backupTarget_->setPlaceholderText(tr("保存位置"));
@@ -215,15 +227,24 @@ QWidget *MainWindow::createBackupPage() {
     connect(browse, &QPushButton::clicked, this, &MainWindow::chooseBackupTarget);
     targetRow->addWidget(backupTarget_, 1); targetRow->addWidget(browse);
     targetLayout->addLayout(targetRow);
+    auto *fileInfo = new QLabel(tr("选择文件查看信息"));
+    fileInfo->setObjectName("selectedSourceInfo"); fileInfo->setProperty("muted", true); fileInfo->setWordWrap(true);
+    connect(sourceTree_->selectionModel(), &QItemSelectionModel::currentChanged, this,
+        [this,fileInfo](const QModelIndex &current) {
+            if (!current.isValid()) { fileInfo->setText(tr("选择文件查看信息")); return; }
+            const QFileInfo info=sourceModel_->fileInfo(current);
+            const QString type=info.isSymLink()?tr("符号链接"):(info.isDir()?tr("目录"):(info.isFile()?tr("文件"):tr("特殊文件")));
+            const QString size=info.isFile() && !info.isSymLink()?humanSize(static_cast<uint64_t>(qMax<qint64>(0,info.size()))):tr("—");
+            fileInfo->setText(tr("%1 · %2 · %3\n%4").arg(type,size,info.lastModified().toString("yyyy-MM-dd HH:mm"),info.absoluteFilePath()));
+        });
+    targetLayout->addWidget(fileInfo);
     backupOptions_ = new BackupOptionsWidget(nullptr, false);
     targetLayout->addWidget(backupOptions_);
-    targetLayout->addStretch();
-    columns->addWidget(target, 3);
-    layout->addLayout(columns);
-
-    auto *filter = new QGroupBox(tr("筛选"));
-    auto *filterLayout = new QHBoxLayout(filter);
+    auto *filter = new QWidget; filter->setObjectName("backupFilterPanel");
+    auto *filterLayout = new QVBoxLayout(filter);
+    filterLayout->setContentsMargins(0, 4, 0, 0); filterLayout->setSpacing(3);
     auto *summaries = new QVBoxLayout;
+    summaries->setSpacing(2);
     filterSummary_ = new QLabel;
     filterSummary_->setWordWrap(true); filterSummary_->setProperty("muted", true);
     previewSummary_ = new QLabel(tr("尚未扫描")); previewSummary_->setProperty("muted", true);
@@ -231,26 +252,31 @@ QWidget *MainWindow::createBackupPage() {
     auto *edit = button(tr("配置…")); auto *preview = button(tr("扫描预览"));
     connect(edit, &QPushButton::clicked, this, &MainWindow::editFilters);
     connect(preview, &QPushButton::clicked, this, &MainWindow::previewFilters);
-    filterLayout->addLayout(summaries, 1); filterLayout->addWidget(edit); filterLayout->addWidget(preview);
-    layout->addWidget(filter); updateFilterSummary();
-    auto *run = new QHBoxLayout; run->addStretch();
-    backupButton_ = button(tr("开始备份"), true); backupButton_->setMinimumWidth(150);
+    filterLayout->addLayout(summaries);
+    auto *run = new QHBoxLayout; run->addWidget(edit); run->addWidget(preview); run->addStretch();
+    backupButton_ = button(tr("开始备份"), true); backupButton_->setMinimumWidth(112);
     connect(backupButton_, &QPushButton::clicked, this, &MainWindow::startBackup);
-    run->addWidget(backupButton_); layout->addLayout(run);
+    run->addWidget(backupButton_); filterLayout->addLayout(run);
+    targetLayout->addStretch(); targetLayout->addWidget(filter);
+    columns->addWidget(target); columns->setStretchFactor(0, 1); columns->setStretchFactor(1, 1);
+    columns->setSizes({390, 500});
+    layout->addWidget(columns, 1);
+    updateFilterSummary();
     return page;
 }
 
 QWidget *MainWindow::createRestorePage() {
     QVBoxLayout *layout = nullptr; QWidget *page = createPageShell(tr("恢复数据"), &layout);
-    auto *form = new QGroupBox(tr("恢复设置")); auto *grid = new QGridLayout(form);
+    auto *form = new QGroupBox(tr("恢复设置")); form->setMaximumWidth(820); auto *grid = new QGridLayout(form);
     archivePath_ = new QLineEdit; restoreTarget_ = new QLineEdit; restorePassword_ = new QLineEdit; restorePassword_->setEchoMode(QLineEdit::Password);
     auto *archiveBrowse = button(tr("浏览…")); auto *targetBrowse = button(tr("浏览…"));
+    archiveBrowse->setMaximumWidth(95); targetBrowse->setMaximumWidth(95);
     connect(archiveBrowse, &QPushButton::clicked, this, &MainWindow::chooseArchive); connect(targetBrowse, &QPushButton::clicked, this, &MainWindow::chooseRestoreFolder);
     grid->addWidget(new QLabel(tr("归档文件")), 0, 0); grid->addWidget(archivePath_, 0, 1); grid->addWidget(archiveBrowse, 0, 2);
     grid->addWidget(new QLabel(tr("恢复到")), 1, 0); grid->addWidget(restoreTarget_, 1, 1); grid->addWidget(targetBrowse, 1, 2);
     grid->addWidget(new QLabel(tr("解密密码")), 2, 0); grid->addWidget(restorePassword_, 2, 1);
     restoreDevices_ = createDeviceRestoreOption();
-    restoreButton_ = button(tr("开始恢复"), true); restoreButton_->setMinimumWidth(150);
+    restoreButton_ = button(tr("开始恢复"), true); restoreButton_->setMinimumWidth(95); restoreButton_->setMaximumWidth(120);
     grid->addWidget(restoreDevices_, 3, 1); grid->addWidget(restoreButton_, 3, 2); layout->addWidget(form);
     connect(restoreButton_, &QPushButton::clicked, this, &MainWindow::startRestore); layout->addStretch(); return page;
 }
@@ -351,7 +377,7 @@ QWidget *MainWindow::createSchedulePage() {
 
 QWidget *MainWindow::createHistoryPage() {
     QVBoxLayout *layout=nullptr;QWidget *page=createPageShell(tr("备份快照 · 查看和恢复版本"),&layout);
-    auto *path=new QLineEdit,*password=new QLineEdit;path->setPlaceholderText(tr("仓库路径"));password->setPlaceholderText(tr("仓库密码"));password->setEchoMode(QLineEdit::Password);auto *browse=button(tr("选择仓库…")),*load=button(tr("加载历史"),true);auto *row=new QHBoxLayout;row->addWidget(path,1);row->addWidget(browse);row->addWidget(password);row->addWidget(load);layout->addLayout(row);
+    auto *path=new QLineEdit,*password=new QLineEdit;path->setPlaceholderText(tr("仓库路径"));password->setPlaceholderText(tr("仓库密码"));password->setEchoMode(QLineEdit::Password);password->setMaximumWidth(200);auto *browse=button(tr("选择仓库…")),*load=button(tr("加载历史"),true);auto *row=new QHBoxLayout;row->addWidget(path,1);row->addWidget(browse);row->addWidget(password);row->addWidget(load);layout->addLayout(row);
     auto *table=new QTableWidget(0,3);table->setHorizontalHeaderLabels({tr("快照 ID"),tr("创建时间"),tr("状态")});table->horizontalHeader()->setStretchLastSection(true);layout->addWidget(table);
     connect(browse,&QPushButton::clicked,this,[this,path]{QString p=QFileDialog::getExistingDirectory(this,tr("选择仓库"));if(!p.isEmpty())path->setText(p);});connect(load,&QPushButton::clicked,this,[this,path,password,table]{LocalRepository repo(path->text().toUtf8().toStdString());std::vector<SnapshotInfo>all;std::string error;if(!password->text().isEmpty()&&QFileInfo::exists(path->text()+"/config.bin")&&!repo.initialize(password->text().toUtf8().toStdString(),error)){QMessageBox::warning(this,tr("读取失败"),QString::fromUtf8(error.c_str()));return;}if(!repo.listSnapshots(all,error)){QMessageBox::warning(this,tr("读取失败"),QString::fromUtf8(error.c_str()));return;}table->setRowCount(0);for(auto&s:all){int r=table->rowCount();table->insertRow(r);table->setItem(r,0,new QTableWidgetItem(QString::fromStdString(s.id)));table->setItem(r,1,new QTableWidgetItem(QDateTime::fromMSecsSinceEpoch(s.createdAtMs).toString("yyyy-MM-dd HH:mm:ss")));auto *state=new QTableWidgetItem(s.partial?tr("部分完成"):tr("完整"));if(!s.warnings.empty())state->setToolTip(QString::fromUtf8(s.warnings.front().c_str()));table->setItem(r,2,state);}});
     auto *devices = createDeviceRestoreOption();

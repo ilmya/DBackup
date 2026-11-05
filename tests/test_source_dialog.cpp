@@ -114,6 +114,19 @@ TEST(SourceTree, SupportsNestedExclusionsAndReinclusions) {
     EXPECT_EQ(model.roots(), QStringList{root + "/file.txt"});
 }
 
+TEST(SourceTree, ShowsCompactSizeAndDateWithDetailedTooltips) {
+    QTemporaryDir temp; ASSERT_TRUE(temp.isValid());
+    QFile file(temp.filePath("sample.bin")); ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    ASSERT_EQ(file.write(QByteArray(1536, 'a')), 1536); file.close();
+    SourceTreeModel model;
+    const QModelIndex name=model.index(file.fileName()); ASSERT_TRUE(name.isValid());
+    const QModelIndex size=name.siblingAtColumn(1), date=name.siblingAtColumn(3);
+    EXPECT_EQ(model.data(size,Qt::DisplayRole).toString(),QStringLiteral("1.5K"));
+    EXPECT_TRUE(model.data(size,Qt::ToolTipRole).toString().contains("1536"));
+    EXPECT_EQ(model.data(date,Qt::DisplayRole).toString(),QFileInfo(file).lastModified().toString("yyyy-MM-dd"));
+    EXPECT_EQ(model.data(date,Qt::ToolTipRole).toString(),QFileInfo(file).lastModified().toString("yyyy-MM-dd HH:mm:ss"));
+}
+
 TEST(FilterDialog, PreservesConditionsAndUsesLocalCalendarDays) {
     FilterOptions input;
     input.pathContains = "docs"; input.nameContains = "report"; input.ownerContains = "alice";
