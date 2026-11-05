@@ -17,6 +17,7 @@ def main() -> int:
     parser.add_argument("--report", required=True)
     parser.add_argument("--mtime-tolerance", type=float, default=2.0)
     parser.add_argument("--single-directory-layout", choices=("flatten", "preserve"), default="flatten")
+    parser.add_argument("--skip-unreadable", action="store_true", help="跳过来源中无法读取的文件")
     args = parser.parse_args()
     first_source = Path(args.source[0]).resolve()
     root = next((parent for parent in (first_source, *first_source.parents)
@@ -29,9 +30,16 @@ def main() -> int:
         if path == root or root not in path.parents:
             raise tool.SafetyError(f"比较输入和报告必须位于验收根目录内: {path}")
     original = tool.build_source_manifest
-    tool.build_source_manifest = lambda values: (
-        expected_source_manifest_with_original(values, original)
-        if args.single_directory_layout == "flatten" else original(values))
+    def source_manifest(values):
+        result = (expected_source_manifest_with_original(values, original)
+                  if args.single_directory_layout == "flatten" else original(values))
+        if args.skip_unreadable:
+            skipped = [entry["path"] for entry in result["entries"] if entry["kind"] == "unreadable"]
+            for path in skipped:
+                print(f"SKIP: 无法读取的来源文件：{path}")
+            result["entries"] = [entry for entry in result["entries"] if entry["kind"] != "unreadable"]
+        return result
+    tool.build_source_manifest = source_manifest
     return tool.command_compare(args)
 
 

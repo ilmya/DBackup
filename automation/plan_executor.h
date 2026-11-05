@@ -14,6 +14,7 @@ struct PlanResult {
 };
 
 inline PlanResult executePlan(const BackupJob &job, const std::string &password, OperationContext context={}) {
+    context.includeSourceDirectory=true;
     PlanResult result;
     std::vector<std::string> sources;
     for (const auto &source:job.sources) sources.push_back(source.toUtf8().toStdString());

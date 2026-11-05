@@ -1,4 +1,5 @@
 #include "gui/filter_dialog.h"
+#include "gui/plan_result.h"
 #include "gui/restore_options.h"
 #include "gui/backup_options.h"
 #include "gui/theme.h"
@@ -73,6 +74,17 @@ TEST(BackupOptions, FitsCompactWidth) {
     }
 }
 
+TEST(BackupOptions, SimpleBackupOnlyAllowsArchive) {
+    BackupOptionsWidget widget(nullptr,false);
+    auto *incremental=widget.findChild<QRadioButton *>("backupMode1");
+    ASSERT_NE(incremental,nullptr);EXPECT_TRUE(incremental->parentWidget()->isHidden());
+    widget.setOptions(true,true,PackFormat::Tar,Compression::None);
+    EXPECT_FALSE(widget.incremental());
+    BackupOptionsWidget plan;
+    plan.setOptions(true,true,PackFormat::Tar,Compression::None);
+    EXPECT_TRUE(plan.incremental());
+}
+
 TEST(SourceTree, SupportsNestedExclusionsAndReinclusions) {
     QTemporaryDir temp; ASSERT_TRUE(temp.isValid());
     const QString root = temp.path() + "/source";
@@ -106,6 +118,7 @@ TEST(FilterDialog, PreservesConditionsAndUsesLocalCalendarDays) {
     FilterOptions input;
     input.pathContains = "docs"; input.nameContains = "report"; input.ownerContains = "alice";
     input.extensions = {".txt", ".md"}; input.type = EntryTypeFilter::FilesOnly;
+    input.typeMask = 0x51;
     input.minSize = 1024; input.maxSize = 8192;
     input.pathRules = {{true, "docs/*"}, {false, "docs/private/*"}};
     input.afterMtimeMs = QDateTime(QDate(2026, 1, 2), QTime(0, 0), QTimeZone::systemTimeZone()).toMSecsSinceEpoch();
@@ -115,10 +128,22 @@ TEST(FilterDialog, PreservesConditionsAndUsesLocalCalendarDays) {
     EXPECT_EQ(result.pathContains, input.pathContains); EXPECT_EQ(result.nameContains, input.nameContains);
     EXPECT_EQ(result.ownerContains, input.ownerContains); EXPECT_EQ(result.extensions, input.extensions);
     EXPECT_EQ(result.type, input.type); EXPECT_EQ(result.minSize, input.minSize); EXPECT_EQ(result.maxSize, input.maxSize);
+    EXPECT_EQ(result.typeMask, input.typeMask);
     ASSERT_EQ(result.pathRules.size(), 2u);
     EXPECT_TRUE(result.pathRules[0].include); EXPECT_EQ(result.pathRules[0].pattern, "docs/*");
     EXPECT_FALSE(result.pathRules[1].include); EXPECT_EQ(result.pathRules[1].pattern, "docs/private/*");
     EXPECT_EQ(result.afterMtimeMs, input.afterMtimeMs); EXPECT_EQ(result.beforeMtimeMs, input.beforeMtimeMs);
+}
+
+TEST(PlanResult, RealtimeSummaryHighlightsChangedFilesAndRetainsPartialNotice) {
+    BackupJob job;job.changedPaths={"/source/changed.txt"};
+    const QString unrelated=QString::fromUtf8("无法读取来源: /source/private.txt: Permission denied");
+    const QString result=realtimeResultDetail(job,unrelated,true);
+    EXPECT_TRUE(result.contains("/source/changed.txt"));
+    EXPECT_FALSE(result.contains("/source/private.txt"));
+    EXPECT_TRUE(result.contains(QString::fromUtf8("其他未备份项")));
+    const QString changedError=QString::fromUtf8("无法读取来源: /source/changed.txt: Permission denied");
+    EXPECT_TRUE(realtimeResultDetail(job,changedError,true).contains(changedError));
 }
 
 int main(int argc, char **argv) {

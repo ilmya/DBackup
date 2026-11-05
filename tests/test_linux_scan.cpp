@@ -52,6 +52,38 @@ TEST(LinuxScan, HonorsCancellation) {
     fs::remove_all(root);
 }
 
+TEST(LinuxScan, PreviewCountsSpecialTypesAndFiltersFifo) {
+    std::string name=(fs::temp_directory_path()/"dbackup-types-XXXXXX").string();
+    const char *root=mkdtemp(name.data());ASSERT_NE(root,nullptr);
+    fs::path source=fs::path(root)/"source";fs::create_directory(source);
+    std::ofstream(source/"file")<<"data";fs::create_symlink("file",source/"link");
+    ASSERT_EQ(mkfifo((source/"pipe").c_str(),0600),0);
+    FilterOptions filter;filter.typeMask=1u<<4;BackupPreview preview;std::string error;
+    ASSERT_TRUE(ArchiveService::preview({source.string()},filter,preview,error,true))<<error;
+    EXPECT_EQ(preview.includedTypes[4],1u);EXPECT_EQ(preview.excludedTypes[0],1u);EXPECT_EQ(preview.excludedTypes[2],1u);
+    OperationContext context;context.includeSourceDirectory=true;PackOptions options;options.filter=filter;
+    const auto archive=(fs::path(root)/"backup.abk").string();
+    ASSERT_TRUE(ArchiveService::create({source.string()},archive,options,error,context))<<error;
+    std::vector<ArchiveEntry> entries;ASSERT_TRUE(ArchiveService::inspect(archive,entries,error))<<error;
+    std::set<std::string> paths;for(const auto &entry:entries)paths.insert(entry.relativePath);
+    EXPECT_TRUE(paths.count("source/pipe"));EXPECT_FALSE(paths.count("source/file"));
+    ASSERT_TRUE(ArchiveService::extract(archive,(fs::path(root)/"restore").string(),error))<<error;
+    struct stat pipeInfo{};ASSERT_EQ(lstat((fs::path(root)/"restore/source/pipe").c_str(),&pipeInfo),0);
+    EXPECT_TRUE(S_ISFIFO(pipeInfo.st_mode));
+    fs::remove_all(root);
+}
+
+TEST(LinuxScan, PreviewReportsUnreadableFiles) {
+    if(geteuid()==0) GTEST_SKIP() << "requires an unprivileged user";
+    std::string name=(fs::temp_directory_path()/"dbackup-preview-XXXXXX").string();
+    const char *root=mkdtemp(name.data());ASSERT_NE(root,nullptr);
+    fs::path file=fs::path(root)/"private";std::ofstream(file)<<"secret";ASSERT_EQ(chmod(file.c_str(),0),0);
+    BackupPreview preview;std::string error;
+    EXPECT_TRUE(ArchiveService::preview({root},{},preview,error,true));
+    EXPECT_EQ(preview.unreadableFiles,1u);EXPECT_NE(error.find("private"),std::string::npos);
+    chmod(file.c_str(),0600);fs::remove_all(root);
+}
+
 TEST(LinuxScan, NestedSelectionExcludesAndReincludesWithNewFiles) {
     std::string name = (fs::temp_directory_path() / "dbackup-selection-XXXXXX").string();
     const char *root = mkdtemp(name.data()); ASSERT_NE(root, nullptr);

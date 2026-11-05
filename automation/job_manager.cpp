@@ -35,20 +35,34 @@ bool JobManager::remove(const QString&id,QString&error){
     const auto before=jobs_; int index=-1; for(int i=0;i<jobs_.size();++i)if(jobs_[i].id==id){index=i;break;}
     if(index<0){error=tr("任务不存在");return false;}
     jobs_.removeAt(index); if(!save(&error)){jobs_=before;return false;}
-    pending_.remove(id); syncWatchers(); if(onChanged_)onChanged_(); return true;
+    pending_.remove(id); pendingJobs_.remove(id); syncWatchers(); if(onChanged_)onChanged_(); return true;
 }
 bool JobManager::setEnabled(const QString&id,bool enabled,QString&error){
-    for(auto&job:jobs_)if(job.id==id){BackupJob changed=job;changed.enabled=enabled;if(!upsert(changed,error))return false;if(!enabled)pending_.remove(id);return true;}
+    for(auto&job:jobs_)if(job.id==id){BackupJob changed=job;changed.enabled=enabled;if(!upsert(changed,error))return false;if(!enabled){pending_.remove(id);pendingJobs_.remove(id);}return true;}
     error=tr("任务不存在");return false;
 }
 bool JobManager::runNow(const QString&id,QString&error){for(const auto&job:jobs_)if(job.id==id){if(paused_){error=tr("自动任务已暂停，无法立即运行");return false;}if(!executor_){error=tr("备份执行器尚未就绪");return false;}const bool alreadyRunning=running_.contains(id);if(!requestRun(job)){error=tr("任务未能加入运行队列");return false;}if(alreadyRunning)error=tr("任务正在运行，已排队一次");return true;}error=tr("任务不存在");return false;}
 void JobManager::updateNext(BackupJob&job){if(!job.enabled||!job.scheduled){job.nextRun={};return;}CronExpression c;std::string e;if(c.parse(job.cron.toStdString(),e)){const QDateTime now=clock_?clock_():QDateTime::currentDateTime();const auto next=c.next(now.toSecsSinceEpoch());if(next!=-1)job.nextRun=QDateTime::fromSecsSinceEpoch(next);}}
-bool JobManager::requestRun(const BackupJob&job){if(paused_||!executor_||job.id.isEmpty())return false;if(running_.contains(job.id)){pending_.insert(job.id);return true;}running_.insert(job.id);executor_(job);return true;}
+bool JobManager::requestRun(const BackupJob&job){
+    if(paused_||!executor_||job.id.isEmpty())return false;
+    if(running_.contains(job.id)){
+        if(!pending_.contains(job.id)) pendingJobs_[job.id]=job;
+        else {
+            auto &queued=pendingJobs_[job.id];
+            if(!queued.realtimeTriggered || !job.realtimeTriggered) {queued.realtimeTriggered=false;queued.changedPaths.clear();queued.fullRescan=false;}
+            else {queued.fullRescan |= job.fullRescan;for(const auto &path:job.changedPaths)if(!queued.changedPaths.contains(path))queued.changedPaths<<path;}
+        }
+        pending_.insert(job.id);return true;
+    }
+    running_.insert(job.id);executor_(job);return true;
+}
 void JobManager::tick(){if(paused_||!executor_)return;const QDateTime now=clock_?clock_():QDateTime::currentDateTime();bool changed=false;for(auto&job:jobs_)if(job.enabled&&job.nextRun.isValid()&&job.nextRun<=now){requestRun(job);updateNext(job);changed=true;}if(changed)save();}
 void JobManager::syncWatchers() {
     watchers_.clear();
     realtimeGeneration_.clear();
     realtimeFirst_.clear();
+    realtimeChanges_.clear();
+    realtimeRescans_.clear();
 
     for (auto &job : jobs_) {
         const std::string jobId = job.id.toUtf8().toStdString();
@@ -77,7 +91,7 @@ void JobManager::syncWatchers() {
             auto watcher = std::make_unique<DirectoryWatcher>();
             std::string error;
             const bool started = watcher->start(sourceUtf8,
-                [this, id = job.id, key, excluded, selectedFile, watcherEpoch]
+                [this, id = job.id, key, excluded, selectedFile, sourceRoot, watcherEpoch]
                 (const std::vector<std::string> &paths, bool fullRescan) {
                     if (!selectedFile.isEmpty() && !fullRescan) {
                         bool relevant = false;
@@ -96,10 +110,15 @@ void JobManager::syncWatchers() {
                         if (onlyOutput) return;
                     }
 
-                    QMetaObject::invokeMethod(this, [this, id, key, watcherEpoch] {
+                    QStringList changedPaths;
+                    for(const auto &path:paths) changedPaths<<QDir(sourceRoot).absoluteFilePath(QString::fromUtf8(path.c_str()));
+                    QMetaObject::invokeMethod(this, [this, id, key, watcherEpoch, changedPaths, fullRescan] {
                         const auto currentEpoch = watcherGeneration_.find(id.toUtf8().toStdString());
                         if (currentEpoch == watcherGeneration_.end() || currentEpoch->second != watcherEpoch) return;
 
+                        const QString changeKey=QString::fromStdString(key);
+                        for(const auto &path:changedPaths) realtimeChanges_[changeKey].insert(QDir::cleanPath(path));
+                        if(fullRescan)realtimeRescans_.insert(changeKey);
                         const int generation = ++realtimeGeneration_[key];
                         if (!realtimeFirst_[key].isValid()) {
                             realtimeFirst_[key] = QDateTime::currentDateTime();
@@ -112,7 +131,9 @@ void JobManager::syncWatchers() {
                                 ++realtimeGeneration_[key];
                                 for (const auto &candidate : jobs_) {
                                     if (candidate.id == id && candidate.enabled) {
-                                        requestRun(candidate);
+                                        BackupJob run=candidate;run.realtimeTriggered=true;
+                                        const QString changeKey=QString::fromStdString(key);run.changedPaths=realtimeChanges_.take(changeKey).values();run.fullRescan=realtimeRescans_.remove(changeKey)>0;run.changedPaths.sort();
+                                        requestRun(run);
                                         break;
                                     }
                                 }
@@ -125,7 +146,9 @@ void JobManager::syncWatchers() {
                             realtimeFirst_[key] = {};
                             for (const auto &candidate : jobs_) {
                                 if (candidate.id == id && candidate.enabled) {
-                                    requestRun(candidate);
+                                    BackupJob run=candidate;run.realtimeTriggered=true;
+                                    const QString changeKey=QString::fromStdString(key);run.changedPaths=realtimeChanges_.take(changeKey).values();run.fullRescan=realtimeRescans_.remove(changeKey)>0;run.changedPaths.sort();
+                                    requestRun(run);
                                     break;
                                 }
                             }
@@ -155,8 +178,8 @@ void JobManager::syncWatchers() {
         }
     }
 }
-void JobManager::markFinished(const QString&id,bool success,const QString&message,bool partial,bool cancelled){running_.remove(id);BackupJob rerun;bool found=false;const bool shouldRerun=pending_.remove(id)>0;for(auto&job:jobs_)if(job.id==id){job.lastRun=clock_?clock_():QDateTime::currentDateTime();job.lastResult=(cancelled?tr("已取消："):(success?(partial?tr("部分完成："):tr("成功：")):tr("失败：")))+message;if(job.enabled)updateNext(job);else job.nextRun={};rerun=job;found=true;break;}if(found){save();if(onChanged_)onChanged_();}if(shouldRerun&&found&&rerun.enabled&&!cancelled)requestRun(rerun);}
-bool JobManager::save(QString *saveError){QJsonArray array;for(const auto&j:jobs_){QJsonObject filter{{"pathContains",QString::fromUtf8(j.filter.pathContains.c_str())},{"nameContains",QString::fromUtf8(j.filter.nameContains.c_str())},{"extension",QString::fromUtf8(j.filter.extension.c_str())},{"ownerContains",QString::fromUtf8(j.filter.ownerContains.c_str())},{"type",static_cast<int>(j.filter.type)},{"minSize",static_cast<double>(j.filter.minSize)},{"maxSize",static_cast<double>(j.filter.maxSize)},{"afterMtimeMs",static_cast<double>(j.filter.afterMtimeMs)},{"beforeMtimeMs",static_cast<double>(j.filter.beforeMtimeMs)}};QJsonArray extensions;for(const auto&s:j.filter.extensions)extensions.append(QString::fromUtf8(s.c_str()));filter["extensions"]=extensions;QJsonArray rules;for(const auto&r:j.filter.pathRules)rules.append(QJsonObject{{"include",r.include},{"pattern",QString::fromUtf8(r.pattern.c_str())}});filter["pathRules"]=rules;QJsonArray selected;for(const auto&r:j.filter.sourceRules)selected.append(QJsonObject{{"include",r.include},{"path",QString::fromUtf8(r.path.c_str())}});filter["sourceRules"]=selected;QJsonObject o{{"repository",j.repository},{"encrypted",j.encrypted},{"format",static_cast<int>(j.format)},{"compression",static_cast<int>(j.compression)},{"id",j.id},{"name",j.name},{"destination",j.destination},{"cron",j.cron},{"filter",filter},{"enabled",j.enabled},{"scheduled",j.scheduled},{"realtime",j.realtime},{"retention",j.retention},{"lastRun",j.lastRun.toString(Qt::ISODateWithMs)},{"nextRun",j.nextRun.toString(Qt::ISODateWithMs)},{"lastResult",j.lastResult}};QJsonArray sources;for(auto&s:j.sources)sources.append(s);o["sources"]=sources;array.append(o);}QSaveFile f(configFilePath_);if(!f.open(QIODevice::WriteOnly)){if(saveError)*saveError=tr("计划保存失败：%1 (%2)").arg(f.fileName(),f.errorString());return false;}const QByteArray payload=QJsonDocument(QJsonObject{{"version",2},{"jobs",array}}).toJson();const qint64 written=f.write(payload);if(written!=payload.size()){qWarning("JobManager config save failed: %s (%s)",qPrintable(f.fileName()),qPrintable(f.errorString()));if(saveError)*saveError=f.errorString();f.cancelWriting();return false;}if(!f.commit()){if(saveError)*saveError=tr("计划保存失败：%1 (%2)").arg(f.fileName(),f.errorString());return false;}return true;}
+void JobManager::markFinished(const QString&id,bool success,const QString&message,bool partial,bool cancelled){running_.remove(id);BackupJob rerun;bool found=false;const bool shouldRerun=pending_.remove(id)>0;const BackupJob queued=pendingJobs_.take(id);for(auto&job:jobs_)if(job.id==id){job.lastRun=clock_?clock_():QDateTime::currentDateTime();job.lastResult=(cancelled?tr("已取消："):(success?(partial?tr("部分完成："):tr("成功：")):tr("失败：")))+message;if(job.enabled)updateNext(job);else job.nextRun={};rerun=job;found=true;break;}if(found){save();if(onChanged_)onChanged_();}if(shouldRerun&&found&&rerun.enabled&&!cancelled){rerun.realtimeTriggered=queued.realtimeTriggered;rerun.changedPaths=queued.changedPaths;rerun.fullRescan=queued.fullRescan;requestRun(rerun);}}
+bool JobManager::save(QString *saveError){QJsonArray array;for(const auto&j:jobs_){QJsonObject filter{{"pathContains",QString::fromUtf8(j.filter.pathContains.c_str())},{"nameContains",QString::fromUtf8(j.filter.nameContains.c_str())},{"extension",QString::fromUtf8(j.filter.extension.c_str())},{"ownerContains",QString::fromUtf8(j.filter.ownerContains.c_str())},{"type",static_cast<int>(j.filter.type)},{"typeMask",static_cast<int>(j.filter.typeMask)},{"minSize",static_cast<double>(j.filter.minSize)},{"maxSize",static_cast<double>(j.filter.maxSize)},{"afterMtimeMs",static_cast<double>(j.filter.afterMtimeMs)},{"beforeMtimeMs",static_cast<double>(j.filter.beforeMtimeMs)}};QJsonArray extensions;for(const auto&s:j.filter.extensions)extensions.append(QString::fromUtf8(s.c_str()));filter["extensions"]=extensions;QJsonArray rules;for(const auto&r:j.filter.pathRules)rules.append(QJsonObject{{"include",r.include},{"pattern",QString::fromUtf8(r.pattern.c_str())}});filter["pathRules"]=rules;QJsonArray selected;for(const auto&r:j.filter.sourceRules)selected.append(QJsonObject{{"include",r.include},{"path",QString::fromUtf8(r.path.c_str())}});filter["sourceRules"]=selected;QJsonObject o{{"repository",j.repository},{"encrypted",j.encrypted},{"format",static_cast<int>(j.format)},{"compression",static_cast<int>(j.compression)},{"id",j.id},{"name",j.name},{"destination",j.destination},{"cron",j.cron},{"filter",filter},{"enabled",j.enabled},{"scheduled",j.scheduled},{"realtime",j.realtime},{"retention",j.retention},{"lastRun",j.lastRun.toString(Qt::ISODateWithMs)},{"nextRun",j.nextRun.toString(Qt::ISODateWithMs)},{"lastResult",j.lastResult}};QJsonArray sources;for(auto&s:j.sources)sources.append(s);o["sources"]=sources;array.append(o);}QSaveFile f(configFilePath_);if(!f.open(QIODevice::WriteOnly)){if(saveError)*saveError=tr("计划保存失败：%1 (%2)").arg(f.fileName(),f.errorString());return false;}const QByteArray payload=QJsonDocument(QJsonObject{{"version",2},{"jobs",array}}).toJson();const qint64 written=f.write(payload);if(written!=payload.size()){qWarning("JobManager config save failed: %s (%s)",qPrintable(f.fileName()),qPrintable(f.errorString()));if(saveError)*saveError=f.errorString();f.cancelWriting();return false;}if(!f.commit()){if(saveError)*saveError=tr("计划保存失败：%1 (%2)").arg(f.fileName(),f.errorString());return false;}return true;}
 void JobManager::load(){
     QFile file(configFilePath_);
     if(!file.exists())return;
@@ -199,7 +222,7 @@ void JobManager::load(){
         job.filter.nameContains=filter.value("nameContains").toString().toUtf8().toStdString();
         job.filter.extension=filter.value("extension").toString().toUtf8().toStdString();
         job.filter.ownerContains=filter.value("ownerContains").toString().toUtf8().toStdString();
-        job.filter.type=static_cast<EntryTypeFilter>(filter.value("type").toInt());
+        job.filter.type=static_cast<EntryTypeFilter>(filter.value("type").toInt()); job.filter.typeMask=static_cast<uint32_t>(filter.value("typeMask").toInt(255));
         job.filter.minSize=static_cast<uint64_t>(filter.value("minSize").toDouble());
         job.filter.maxSize=static_cast<uint64_t>(filter.value("maxSize").toDouble());
         job.filter.afterMtimeMs=static_cast<int64_t>(filter.value("afterMtimeMs").toDouble());

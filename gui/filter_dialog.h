@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include "core/archive.h"
+#include <array>
 
 class QCheckBox;
 class QComboBox;
@@ -35,6 +36,7 @@ class FilterDialog final : public QDialog {
     QCheckBox *cache_ = nullptr;
     QCheckBox *build_ = nullptr;
     QCheckBox *logs_ = nullptr;
+    std::array<QCheckBox *, 8> fileTypes_{};
     QPlainTextEdit *includeRules_ = nullptr;
     QPlainTextEdit *excludeRules_ = nullptr;
 };

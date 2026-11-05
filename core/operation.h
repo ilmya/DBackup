@@ -23,6 +23,7 @@ struct OperationContext {
     std::function<void(const OperationProgress &)> onProgress;
     bool allowDeviceNodes = true;
     bool noReplace = false;
+    bool includeSourceDirectory = false;
     std::vector<std::string> *warnings = nullptr;
 
     bool isCancelled() const { return cancelled && cancelled->load(); }

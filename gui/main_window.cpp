@@ -46,6 +46,7 @@
 #include "gui/backup_options.h"
 #include "gui/source_tree.h"
 #include "gui/restore_options.h"
+#include "gui/plan_result.h"
 #include "automation/job_manager.h"
 #include "automation/plan_executor.h"
 #include "core/repository.h"
@@ -66,6 +67,16 @@ QString humanSize(uint64_t bytes) {
     int unit = 0;
     while (value >= 1024.0 && unit < units.size() - 1) { value /= 1024.0; ++unit; }
     return QString::number(value, 'f', unit == 0 ? 0 : 2) + " " + units[unit];
+}
+
+QString previewDetails(const BackupPreview &preview, const std::string &warnings) {
+    const QStringList names={QObject::tr("普通文件"),QObject::tr("目录"),QObject::tr("符号链接"),QObject::tr("硬链接"),QObject::tr("FIFO 管道"),QObject::tr("字符设备"),QObject::tr("块设备"),QObject::tr("Unix 套接字")};
+    QString text=QObject::tr("类型                         包含 / 排除\n");
+    for(int i=0;i<names.size();++i) text+=QObject::tr("%1：%2 / %3\n").arg(names[i]).arg(preview.includedTypes[i]).arg(preview.excludedTypes[i]);
+    text+=QObject::tr("\n普通文件总大小：%1").arg(humanSize(preview.includedBytes));
+    if(preview.unreadableFiles)text+=QObject::tr("\n其中 %1 个文件无法读取，备份时将跳过").arg(preview.unreadableFiles);
+    if(!warnings.empty())text+=QObject::tr("\n\n无法读取：\n%1").arg(QString::fromUtf8(warnings.c_str()));
+    return text;
 }
 
 QString stageName(OperationStage stage) {
@@ -155,7 +166,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             SnapshotInfo info;info.partial=result.partial;
             QMetaObject::invokeMethod(this, [this, job, ok, error, info, cancel] {
                 const bool cancelled=!ok && cancel->load();planCancellations_.remove(job.id);
-                jobs_->markFinished(job.id, ok, QString::fromUtf8(error.c_str()), info.partial, cancelled);
+                const QString detail=QString::fromUtf8(error.c_str());
+                QString recent=detail;
+                if(job.realtimeTriggered && ok)recent=realtimeResultDetail(job,detail,info.partial);
+                jobs_->markFinished(job.id, ok, recent, info.partial, cancelled);
                 appendLog(ok ? (info.partial ? tr("计划“%1”部分完成：%2").arg(job.name, QString::fromUtf8(error.c_str())) : tr("计划“%1”完成：%2").arg(job.name, QString::fromUtf8(error.c_str())))
                              : (cancelled?tr("计划“%1”已取消：%2"):tr("计划“%1”失败：%2")).arg(job.name, QString::fromUtf8(error.c_str())), !ok || info.partial);
             }, Qt::QueuedConnection);
@@ -201,7 +215,7 @@ QWidget *MainWindow::createBackupPage() {
     connect(browse, &QPushButton::clicked, this, &MainWindow::chooseBackupTarget);
     targetRow->addWidget(backupTarget_, 1); targetRow->addWidget(browse);
     targetLayout->addLayout(targetRow);
-    backupOptions_ = new BackupOptionsWidget;
+    backupOptions_ = new BackupOptionsWidget(nullptr, false);
     targetLayout->addWidget(backupOptions_);
     targetLayout->addStretch();
     columns->addWidget(target, 3);
@@ -296,10 +310,8 @@ QWidget *MainWindow::createSchedulePage() {
         connect(previewButton,&QPushButton::clicked,&dialog,[&dialog,model,&filter]{
             std::vector<std::string> sources;for(const auto &source:model->roots())sources.push_back(source.toUtf8().toStdString());
             FilterOptions selected=filter;selected.sourceRules=model->rules();BackupPreview preview;std::string error;
-            if(!ArchiveService::preview(sources,selected,preview,error)){QMessageBox::warning(&dialog,QObject::tr("预览失败"),QString::fromUtf8(error.c_str()));return;}
-            QString result=QObject::tr("包含 %1 个文件、%2 个目录，排除 %3 个文件").arg(preview.includedFiles).arg(preview.includedDirectories).arg(preview.excludedFiles);
-            if(!error.empty())result+=QStringLiteral("\n")+QString::fromUtf8(error.c_str());
-            QMessageBox::information(&dialog,QObject::tr("扫描预览"),result);
+            if(!ArchiveService::preview(sources,selected,preview,error,true)){QMessageBox::warning(&dialog,QObject::tr("预览失败"),QString::fromUtf8(error.c_str()));return;}
+            QMessageBox::information(&dialog,QObject::tr("扫描预览"),previewDetails(preview,error));
         });
         form->addRow(tr("名称"),name);form->addRow(tr("保存目录"),targetRow);form->addRow(options);form->addRow(tr("运行"),modeRow);form->addRow(tr("Cron"),cron);form->addRow(tr("保留数量"),retention);auto *filterRow=new QHBoxLayout;filterRow->addWidget(filterButton);filterRow->addWidget(previewButton);form->addRow(filterRow);
         body->addWidget(formWidget,3);outer->addLayout(body,1);
@@ -401,13 +413,14 @@ void MainWindow::previewFilters() {
     setBusy(true, tr("正在扫描文件元数据…")); FilterOptions filters = filters_; filters.sourceRules = sourceModel_->rules();
     const bool incremental = backupOptions_->incremental();
     QThread *worker = QThread::create([this, sources, filters, incremental] {
-        BackupPreview preview; std::string error; const bool ok = ArchiveService::preview(sources, filters, preview, error, incremental);
+        BackupPreview preview; std::string error; const bool ok = ArchiveService::preview(sources, filters, preview, error, true);
         QMetaObject::invokeMethod(this, [this, ok, preview, error] {
             setBusy(false); if (!ok) { QMessageBox::warning(this, tr("预览失败"), QString::fromUtf8(error.c_str())); appendLog(tr("扫描预览失败：%1").arg(QString::fromUtf8(error.c_str())), true); return; }
             previewSummary_->setText(tr("预计包含 %1 个文件、%2 个文件夹，共 %3；排除 %4 个文件")
                 .arg(preview.includedFiles).arg(preview.includedDirectories).arg(humanSize(preview.includedBytes)).arg(preview.excludedFiles));
             appendLog(tr("扫描预览完成：%1 个文件，%2").arg(preview.includedFiles).arg(humanSize(preview.includedBytes)));
-            if (!error.empty()) { appendLog(tr("部分来源无法读取：%1").arg(QString::fromUtf8(error.c_str())), true); QMessageBox::warning(this, tr("预览不完整"), QString::fromUtf8(error.c_str())); }
+            if (!error.empty()) appendLog(tr("部分来源无法读取：%1").arg(QString::fromUtf8(error.c_str())), true);
+            QMessageBox::information(this, tr("扫描预览"), previewDetails(preview,error));
         }, Qt::QueuedConnection);
     });
     connect(worker, &QThread::finished, worker, &QObject::deleteLater); worker->start();
@@ -418,11 +431,16 @@ void MainWindow::startBackup() {
     const auto sources = sourcePaths(); const QString target = backupTarget_->text().trimmed();
     if (sources.empty() || target.isEmpty()) { QMessageBox::information(this, tr("无法开始备份"), tr("请添加备份来源并选择归档保存位置。")); return; }
     const bool incremental=backupOptions_->incremental();PackOptions options=backupOptions_->options();options.filter=filters_;options.filter.sourceRules=sourceModel_->rules();
+    if(!incremental){
+        const bool plainTar=options.format==PackFormat::Tar && options.compression==Compression::None && !backupOptions_->encryptionEnabled();
+        if(plainTar && target.endsWith(".abk",Qt::CaseInsensitive)){QMessageBox::warning(this,tr("文件名与格式不一致"),tr("当前输出为标准 tar，请重新选择 .tar 保存路径。"));return;}
+        if(!plainTar && target.endsWith(".tar",Qt::CaseInsensitive)){QMessageBox::warning(this,tr("文件名与格式不一致"),tr("当前输出为 DBackup 封装（.abk）；tar 只是不压缩、不加密时的外部格式。请重新选择保存路径。"));return;}
+    }
     if(!incremental&&backupOptions_->encryptionEnabled()&&options.password.empty()){QMessageBox::information(this,tr("需要加密密码"),tr("使用 AES 加密时请输入密码。"));return;}
     if(incremental&&options.password.empty()){QMessageBox::information(this,tr("需要仓库密码"),tr("增量仓库必须设置密码，以保护数据块和快照清单。"));return;}
     cancelled_=false;setBusy(true, tr("正在创建备份归档…")); appendLog(tr("开始备份到 %1").arg(target));
     QThread *worker = QThread::create([this, sources, target, options,incremental] {
-        OperationContext context;context.cancelled=&cancelled_;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);};
+        OperationContext context;context.cancelled=&cancelled_;context.includeSourceDirectory=true;context.onProgress=[this](const OperationProgress&p){QMetaObject::invokeMethod(this,[this,p]{updateProgress(p);},Qt::QueuedConnection);};
         std::string error;bool ok=false;if(incremental){LocalRepository repository(target.toUtf8().toStdString());SnapshotOptions snapshot;snapshot.sources=sources;snapshot.password=options.password;snapshot.filter=options.filter;SnapshotInfo info;ok=repository.createSnapshot(snapshot,info,error,context);}else ok=ArchiveService::create(sources, target.toUtf8().toStdString(), options, error,context);
         std::string digest,digestError;if(ok&&!incremental)dbackup::crypto::md5File(target.toUtf8().toStdString(),digest,digestError);
         QMetaObject::invokeMethod(this, [this, ok, target, error, digest, digestError] { setBusy(false); if (ok) { const bool partial=!error.empty();appendLog(partial?tr("备份部分完成：%1").arg(target):tr("备份完成：%1").arg(target),partial);QString message=tr("备份已写入：\n%1").arg(target);if(!digest.empty())message+=tr("\nMD5（仅供摘要展示）：%1").arg(QString::fromStdString(digest));else if(!digestError.empty())message+=tr("\nMD5 计算失败：%1").arg(QString::fromStdString(digestError));if(partial){appendLog(QString::fromUtf8(error.c_str()),true);message+=tr("\n\n跳过的项目：\n%1").arg(QString::fromUtf8(error.c_str()));QMessageBox::warning(this,tr("备份部分完成"),message);}else QMessageBox::information(this, tr("备份完成"), message); }

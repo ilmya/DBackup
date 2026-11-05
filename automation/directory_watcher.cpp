@@ -121,7 +121,7 @@ void DirectoryWatcher::run() {
                     offset += sizeof(inotify_event) + event->len;
                 }
             }
-            if (rescan) { callback_({}, true); rescan = false; changes.clear(); }
+            if (rescan) { callback_({changes.begin(), changes.end()}, true); rescan = false; changes.clear(); }
             if (!changes.empty()) {
                 auto now = Clock::now();
                 if (now - last >= std::chrono::milliseconds(debounceMs_) ||

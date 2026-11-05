@@ -40,6 +40,17 @@ def add_extra_cases(source):
     os.utime(extra, ns=(stamp, stamp))
 
 
+def add_permission_case(source):
+    directory = source / "dbackup_permission_case"
+    if directory.exists() or directory.is_symlink():
+        return
+    directory.mkdir()
+    (directory / "readable.txt").write_text("readable\n", encoding="utf-8")
+    restricted = directory / "no_read.txt"
+    restricted.write_text("unreadable for ordinary users\n", encoding="utf-8")
+    restricted.chmod(0)
+
+
 def prepare(root):
     if root.is_symlink():
         raise tool.SafetyError("演示根目录不能是符号链接")
@@ -53,6 +64,7 @@ def prepare(root):
         if source.is_symlink() or not source.is_dir():
             raise tool.SafetyError("案例目录不存在或是符号链接")
         add_extra_cases(source)
+        add_permission_case(source)
         print(f"沿用已有演示目录，不覆盖已有案例：{root}")
         return
     root.mkdir(parents=True)
@@ -73,9 +85,10 @@ def prepare(root):
     for path in sorted(source.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         os.utime(path, ns=(timestamp, timestamp), follow_symlinks=False)
     add_extra_cases(source)
+    add_permission_case(source)
     print(f"已创建展示案例：{source}")
     print("包含普通文件、空文件和目录、权限、时间、符号链接、硬链接和 FIFO。")
-    print("设备节点与套接字未放入此往返案例：设备恢复需要额外权限，套接字应拒绝备份。")
+    print("不可读文件用于观察部分完成和跳过提示；设备与套接字另有独立案例。")
 
 
 def run_command(args):
@@ -240,7 +253,7 @@ def main():
             raise tool.SafetyError("恢复目录必须位于演示目录的 restore 子目录中")
     report = root / "reports" / (run_id + ".md")
     run_command([sys.executable, PROJECT / "tests/acceptance_compare.py", "--source", source,
-                 "--restored", restored, "--report", report, "--mtime-tolerance", "0"])
+                 "--restored", restored, "--report", report, "--mtime-tolerance", "0", "--skip-unreadable"])
     print(f"来源：{source}\n恢复：{restored}\n报告：{report}")
     if args.command == "run" and not run_scenarios(root, Path(args.cli), run_id):
         sys.exit(1)

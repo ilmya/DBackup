@@ -10,7 +10,7 @@ class QLineEdit;
 
 class BackupOptionsWidget final : public QWidget {
  public:
-    explicit BackupOptionsWidget(QWidget *parent = nullptr);
+    explicit BackupOptionsWidget(QWidget *parent = nullptr, bool allowRepository = true);
     bool incremental() const;
     bool encryptionEnabled() const;
     PackOptions options() const;
@@ -30,4 +30,5 @@ class BackupOptionsWidget final : public QWidget {
     QLabel *repositoryHint_ = nullptr;
     QLabel *repositoryEncryption_ = nullptr;
     QLabel *outputHint_ = nullptr;
+    bool allowRepository_ = true;
 };

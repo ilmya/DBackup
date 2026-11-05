@@ -23,6 +23,8 @@ struct BackupJob {
     QDateTime lastRun, nextRun;
     QString lastResult;
     QString realtimeStatus;
+    bool realtimeTriggered=false, fullRescan=false;
+    QStringList changedPaths;
 };
 
 class JobManager : public QObject {
@@ -54,6 +56,9 @@ class JobManager : public QObject {
     QMap<QString,QMap<QString,QString>> watcherStatuses_;
     QSet<QString> running_;
     QSet<QString> pending_;
+    QMap<QString, BackupJob> pendingJobs_;
+    QMap<QString, QSet<QString>> realtimeChanges_;
+    QSet<QString> realtimeRescans_;
     Clock clock_;
     std::function<void()> onChanged_;
     QString configFilePath_;

@@ -3,12 +3,15 @@
 
 
 #include <fnmatch.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 #include <map>
 #include <set>
 
@@ -49,6 +52,8 @@ std::string lower(std::string value) {
 
 bool matches(const Entry &entry, const FilterOptions &filter, const fs::path &filterPath) {
     const bool directory = entry.type == 1;
+    const unsigned category = entry.type == 0 && entry.metadata.links > 1 ? 3 : entry.type;
+    if (!(filter.typeMask & (1u << category))) return false;
     if (filter.type == EntryTypeFilter::FilesOnly && directory) return false;
     if (filter.type == EntryTypeFilter::DirectoriesOnly && !directory) return false;
     const auto path = lower(filterPath.generic_string());
@@ -88,6 +93,8 @@ bool matches(const Entry &entry, const FilterOptions &filter, const fs::path &fi
 }
 
 void addPreview(BackupPreview &result, const Entry &entry, bool included) {
+    const unsigned category = entry.type == 0 && entry.metadata.links > 1 ? 3 : entry.type;
+    if (included) ++result.includedTypes[category]; else ++result.excludedTypes[category];
     const uint64_t bytes = entry.type == 0 ? entry.metadata.size : 0;
     if (entry.type == 1) {
         if (included) ++result.includedDirectories; else ++result.excludedDirectories;
@@ -129,9 +136,16 @@ bool collect(const std::vector<std::string> &sources, const fs::path &excluded,
         else if (S_ISCHR(entry.metadata.mode)) entry.type = 5;
         else if (S_ISBLK(entry.metadata.mode)) entry.type = 6;
         else if (S_ISSOCK(entry.metadata.mode)) entry.type = 7;
-        else if (!S_ISREG(entry.metadata.mode)) { error = "不支持的文件类型（例如套接字）: " + path.string(); return false; }
+        else if (!S_ISREG(entry.metadata.mode)) { error = "不支持的文件类型: " + path.string(); return false; }
         if (const passwd *owner = getpwuid(entry.metadata.uid)) entry.owner = owner->pw_name;
         const bool selected = forceDirectory || matches(entry, filter, filterRelative);
+        if (preview && selected && entry.type == 0) {
+            int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+            if (fd < 0 && permissionFailure(errno)) {
+                ++preview->unreadableFiles;
+                context.warn("无法读取文件: " + path.string() + ": " + std::strerror(errno));
+            } else if (fd >= 0) close(fd);
+        }
         if (preview) addPreview(*preview, entry, selected);
         if (!selected) return true;
         if (!linux_file::validRelativePath(relative) || !names.insert(entry.relativePath).second) {
@@ -942,7 +956,7 @@ bool ArchiveService::create(const std::vector<std::string> &sources, const std::
     const size_t warningStart = scanContext.warnings->size();
     std::vector<dbackup::archive_scan::Entry> scanned;
     OperationProgress progress; progress.stage = OperationStage::Scanning; context.report(progress);
-    if (!dbackup::archive_scan::collect(sources, destination, options.filter, scanned, nullptr, scanContext, error)) return false;
+    if (!dbackup::archive_scan::collect(sources, destination, options.filter, scanned, nullptr, scanContext, error, context.includeSourceDirectory)) return false;
     std::vector<Entry> entries;
     std::set<std::string> availableFiles;
     progress.stage = OperationStage::Reading; progress.totalFiles = scanned.size();

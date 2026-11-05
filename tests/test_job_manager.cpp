@@ -83,6 +83,7 @@ TEST_F(JobManagerTest, PersistsRealtimeOnlySelectionRulesAndPartialResult) {
     BackupJob job = makeJob();
     job.scheduled = false; job.realtime = true; job.cron.clear();
     job.filter.sourceRules = {{"/tmp/dbackup-test/source", true}, {"/tmp/dbackup-test/source/skip", false}};
+    job.filter.typeMask=0x15;
     {
         JobManager manager(nullptr, jobsFilePath());
         QString error; ASSERT_TRUE(manager.upsert(job, error)) << error.toStdString();
@@ -98,6 +99,7 @@ TEST_F(JobManagerTest, PersistsRealtimeOnlySelectionRulesAndPartialResult) {
     ASSERT_EQ(loaded.filter.sourceRules.size(), 2u);
     EXPECT_TRUE(loaded.filter.sourceRules[0].include);
     EXPECT_FALSE(loaded.filter.sourceRules[1].include);
+    EXPECT_EQ(loaded.filter.typeMask,0x15u);
     EXPECT_TRUE(loaded.lastResult.contains("部分完成"));
 }
 
@@ -169,8 +171,8 @@ TEST_F(JobManagerTest, RealtimeJobWatchesSelectedSingleFile) {
     BackupJob job = makeJob(); job.scheduled = false; job.realtime = true; job.cron.clear();
     job.sources = {selected}; job.destination = directory.filePath("repository");
     JobManager manager(nullptr, jobsFilePath());
-    int executions = 0;
-    manager.setExecutor([&executions](const BackupJob &) { ++executions; });
+    int executions = 0; BackupJob requested;
+    manager.setExecutor([&](const BackupJob &value) { ++executions; requested=value; });
     QString error; ASSERT_TRUE(manager.upsert(job, error)) << error.toStdString();
     manager.start();
     QElapsedTimer timer; timer.start();
@@ -182,6 +184,8 @@ TEST_F(JobManagerTest, RealtimeJobWatchesSelectedSingleFile) {
     timer.restart();
     while (timer.elapsed() < 7000 && executions == 0) { QCoreApplication::processEvents(); QThread::msleep(20); }
     EXPECT_EQ(executions, 1);
+    EXPECT_TRUE(requested.realtimeTriggered);
+    EXPECT_TRUE(requested.changedPaths.contains(selected));
     if (executions) manager.markFinished(job.id, true, "done");
 }
 

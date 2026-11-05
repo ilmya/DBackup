@@ -137,6 +137,17 @@ FilterDialog::FilterDialog(const FilterOptions &options, QWidget *parent) : QDia
     form->addRow(tr("所有者包含"), ownerEdit_);
     tabs->addTab(basic, tr("基础条件"));
 
+    auto *types = new QWidget;
+    auto *typesLayout = new QVBoxLayout(types);
+    const QStringList typeNames{tr("普通文件"),tr("目录"),tr("符号链接"),tr("硬链接"),tr("FIFO 管道"),tr("字符设备"),tr("块设备"),tr("Unix 套接字")};
+    for (int i=0;i<typeNames.size();++i) {
+        fileTypes_[i]=new QCheckBox(typeNames[i],types);
+        fileTypes_[i]->setObjectName(QStringLiteral("fileType%1").arg(i));
+        fileTypes_[i]->setChecked(options.typeMask & (1u<<i));
+        typesLayout->addWidget(fileTypes_[i]);
+    }
+    typesLayout->addStretch();tabs->addTab(types,tr("文件类型"));
+
     auto *rules = new QWidget;
     auto *rulesLayout = new QVBoxLayout(rules);
     auto *common = new QGroupBox(tr("常用排除"));
@@ -185,6 +196,7 @@ FilterDialog::FilterDialog(const FilterOptions &options, QWidget *parent) : QDia
         entryType_->setCurrentIndex(0); minSize_->setValue(0); maxSize_->setValue(0);
         afterEnabled_->setChecked(false); beforeEnabled_->setChecked(false);
         temporary_->setChecked(false); cache_->setChecked(false); build_->setChecked(false); logs_->setChecked(false);
+        for (auto *type : fileTypes_) type->setChecked(true);
         includeRules_->clear(); excludeRules_->clear();
     });
     root->addWidget(buttons);
@@ -203,6 +215,8 @@ FilterOptions FilterDialog::options() const {
     result.nameContains = nameEdit_->text().trimmed().toUtf8().toStdString();
     result.ownerContains = ownerEdit_->text().trimmed().toUtf8().toStdString();
     result.type = static_cast<EntryTypeFilter>(entryType_->currentIndex());
+    result.typeMask=0;
+    for (unsigned i=0;i<fileTypes_.size();++i) if(fileTypes_[i]->isChecked()) result.typeMask|=1u<<i;
     for (const QString &value : extensionsEdit_->text().split(',', Qt::SkipEmptyParts))
         result.extensions.push_back(value.trimmed().toUtf8().toStdString());
     result.minSize = static_cast<uint64_t>(minSize_->value()) * unitMultiplier(minUnit_->currentIndex());

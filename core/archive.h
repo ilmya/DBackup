@@ -34,6 +34,7 @@ struct FilterOptions {
     std::vector<PathFilterRule> pathRules;
     std::vector<SourceSelectionRule> sourceRules;
     EntryTypeFilter type = EntryTypeFilter::Any;
+    uint32_t typeMask = 0xff;
     uint64_t minSize = 0;
     uint64_t maxSize = 0;
     int64_t afterMtimeMs = 0;
@@ -41,6 +42,9 @@ struct FilterOptions {
 };
 
 struct BackupPreview {
+    uint64_t includedTypes[8]{};
+    uint64_t excludedTypes[8]{};
+    uint64_t unreadableFiles = 0;
     uint64_t includedFiles = 0;
     uint64_t includedDirectories = 0;
     uint64_t includedBytes = 0;
