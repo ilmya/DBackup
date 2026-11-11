@@ -12,17 +12,23 @@ namespace dbackup::crypto {
 
 inline constexpr uint64_t kDefaultPbkdf2Iterations = 100000;
 
-bool randomBytes(std::vector<uint8_t> &output, size_t size);
-bool sha256(const uint8_t *input, size_t size, std::vector<uint8_t> &digest);
-bool pbkdf2Sha256(const std::string &password, const std::vector<uint8_t> &salt,
-                  uint64_t iterations, std::vector<uint8_t> &key);
+// 从操作系统安全随机源生成指定长度的随机字节。
+bool randomBytes(std::vector<uint8_t>& output, size_t size);
+// 计算 SHA-256 摘要，输出长度固定为 32 字节。
+bool sha256(const uint8_t* input, size_t size, std::vector<uint8_t>& digest);
+// 使用 PBKDF2-HMAC-SHA256 从密码和盐派生密钥。
+bool pbkdf2Sha256(const std::string& password, const std::vector<uint8_t>& salt,
+                  uint64_t iterations, std::vector<uint8_t>& key);
 
-// Uses a 256-bit key, a 96-bit nonce and a 128-bit authentication tag.
-// Encryption generates a nonce when the supplied nonce is empty.
-bool aes256Gcm(bool encrypt, const std::vector<uint8_t> &input,
-               const std::vector<uint8_t> &key, std::vector<uint8_t> &nonce,
-               std::vector<uint8_t> &tag, std::vector<uint8_t> &output);
+// 使用 AES-256-GCM 加解密；加密时可自动生成随机 nonce，解密时校验认证标签。
+bool aes256Gcm(bool encrypt, const std::vector<uint8_t>& input, const std::vector<uint8_t>& key,
+               std::vector<uint8_t>& nonce, std::vector<uint8_t>& tag,
+               std::vector<uint8_t>& output);
+// 附加认证数据参与 GCM 认证，但不会加密或写入输出。
+bool aes256Gcm(bool encrypt, const std::vector<uint8_t>& input, const std::vector<uint8_t>& key,
+               std::vector<uint8_t>& nonce, std::vector<uint8_t>& tag,
+               const std::vector<uint8_t>& associatedData, std::vector<uint8_t>& output);
 
-}  // namespace dbackup::crypto
+} // namespace dbackup::crypto
 
-#endif  // DBACKUP_CORE_CRYPTO_H_
+#endif // DBACKUP_CORE_CRYPTO_H_

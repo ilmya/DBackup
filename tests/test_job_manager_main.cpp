@@ -2,7 +2,7 @@
 
 #include <QCoreApplication>
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     QCoreApplication::setOrganizationName("DBackup");
     QCoreApplication::setApplicationName("AutomationUnitTests");

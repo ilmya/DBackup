@@ -3,14 +3,11 @@ add_executable(BackupToolTests
     test_archive.cpp
     test_crypto.cpp
     test_pipeline.cpp
-    test_linux_file.cpp
+    test_tar_rules.cpp
     test_linux_scan.cpp
-    test_linux_format.cpp
-    test_linux_restore.cpp
-    test_linux_archive.cpp
-    test_special.cpp
+    test_linux_filesystem.cpp
     test_repository.cpp
-    test_features.cpp
+    test_repository_policy.cpp
 )
 
 target_link_libraries(BackupToolTests PRIVATE
@@ -29,10 +26,12 @@ add_test(NAME CredentialUnavailableTest
     COMMAND ${CMAKE_COMMAND} -E env
         DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/dbackup-test-bus
         $<TARGET_FILE:CredentialUnavailableTest>)
+set_tests_properties(CredentialUnavailableTest PROPERTIES LABELS integration)
 
 if(TARGET Qt6::Core)
     add_executable(BackupToolAutomationTests
         test_job_manager.cpp
+        test_job_policy.cpp
         test_job_manager_main.cpp
         ../automation/job_manager.cpp
         ../automation/cron.cpp
@@ -48,12 +47,18 @@ if(TARGET Qt6::Core)
     gtest_discover_tests(BackupToolAutomationTests)
 endif()
 
+# GTest cases are discovered after build, so assign per-case labels from CTest.
+# Keep this include last so both GTest test lists are available when CTest reads it.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/CTestLabels.cmake")
+
 if(TARGET Qt6::Widgets)
     add_executable(SourceDialogTest test_source_dialog.cpp ../gui/backup_options.cpp ../gui/source_tree.cpp ../gui/filter_dialog.cpp ../gui/filter_dialog.h)
     target_include_directories(SourceDialogTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
     target_link_libraries(SourceDialogTest PRIVATE dbackup_core Qt6::Widgets GTest::gtest)
     add_test(NAME SourceDialogTest COMMAND ${CMAKE_COMMAND} -E env
         QT_QPA_PLATFORM=offscreen $<TARGET_FILE:SourceDialogTest>)
+    set_tests_properties(SourceDialogTest PROPERTIES LABELS integration)
     add_executable(MainWindowLayoutTest test_main_window_layout.cpp
         ../gui/main_window.cpp ../gui/backup_options.cpp ../gui/source_tree.cpp ../gui/filter_dialog.cpp
         ../automation/job_manager.cpp)
@@ -61,6 +66,7 @@ if(TARGET Qt6::Widgets)
     target_link_libraries(MainWindowLayoutTest PRIVATE dbackup_core Qt6::Widgets GTest::gtest)
     add_test(NAME MainWindowLayoutTest COMMAND bash "${PROJECT_SOURCE_DIR}/tests/run_in_test_keyring.sh"
         "${CMAKE_COMMAND}" -E env QT_QPA_PLATFORM=offscreen $<TARGET_FILE:MainWindowLayoutTest>)
+    set_tests_properties(MainWindowLayoutTest PROPERTIES LABELS integration)
 endif()
 
 if(DBACKUP_BUILD_TEST_CLI)
@@ -75,6 +81,7 @@ if(DBACKUP_BUILD_TEST_CLI)
         AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 
     add_test(NAME BackupToolTestCliHelp COMMAND $<TARGET_FILE:BackupToolTestCli> --help)
+    set_tests_properties(BackupToolTestCliHelp PROPERTIES LABELS integration)
 
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     set(DBACKUP_TEST_DATA_ROOT "${CMAKE_BINARY_DIR}/acceptance-data" CACHE PATH "验收测试数据目录")
@@ -86,22 +93,30 @@ if(DBACKUP_BUILD_TEST_CLI)
     file(WRITE "${CMAKE_BINARY_DIR}/qt-plugin-dir.txt" "${DBACKUP_TEST_PLUGIN_DIR}")
     add_test(NAME AcceptanceToolSelfTest
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/run_acceptance_selftest.py")
+    set_tests_properties(AcceptanceToolSelfTest PROPERTIES LABELS support)
     add_test(NAME DemoComparisonTest
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_demo_compare.py")
+    set_tests_properties(DemoComparisonTest PROPERTIES LABELS support)
+    add_test(NAME DemoVerifySelfTest
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_demo_verify.py")
+    set_tests_properties(DemoVerifySelfTest PROPERTIES LABELS support)
     add_test(NAME AcceptanceFixtureGenerate
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/prepare_acceptance_data.py"
             --root "${DBACKUP_TEST_DATA_ROOT}" --profile standard --reset)
+    set_tests_properties(AcceptanceFixtureGenerate PROPERTIES LABELS support)
     add_test(NAME AcceptanceTestCliSmoke
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/acceptance_cli_smoke.py"
             --root "${DBACKUP_TEST_DATA_ROOT}" --test-cli $<TARGET_FILE:BackupToolTestCli>)
+    set_tests_properties(AcceptanceTestCliSmoke PROPERTIES LABELS integration)
     add_test(NAME TarInterop
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/tar_interop.py"
             --root "${DBACKUP_TEST_DATA_ROOT}" --cli $<TARGET_FILE:BackupToolTestCli>)
-    set_tests_properties(TarInterop PROPERTIES DEPENDS AcceptanceFixtureGenerate TIMEOUT 180)
+    set_tests_properties(TarInterop PROPERTIES DEPENDS AcceptanceFixtureGenerate TIMEOUT 180 LABELS integration)
     set_tests_properties(AcceptanceTestCliSmoke PROPERTIES DEPENDS AcceptanceFixtureGenerate TIMEOUT 180)
 
     add_test(NAME AcceptanceScenarioCatalog
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/validate_acceptance_catalog.py")
+    set_tests_properties(AcceptanceScenarioCatalog PROPERTIES LABELS support)
     set_tests_properties(AcceptanceToolSelfTest PROPERTIES
         ENVIRONMENT "DBACKUP_ACCEPTANCE_TEST_TMP=${DBACKUP_TEST_TEMP_ROOT}")
     set_tests_properties(BackupToolTestCliHelp AcceptanceTestCliSmoke PROPERTIES

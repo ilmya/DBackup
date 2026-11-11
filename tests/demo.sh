@@ -1,24 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 project="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-command_name="${1:-run}"
+command_name="${1:-help}"
 case "$command_name" in
-  prepare) exec python3 "$project/tests/demo.py" prepare ;;
-  run)
-    python3 "$project/tests/demo.py" prepare
-    bash "$project/build.sh" build
-    exec python3 "$project/tests/demo.py" run --cli "${DBACKUP_BUILD_DIR:-$project/out/build-test}/BackupToolTestCli"
+  compare)
+    shift
+    exec python3 -B "$project/tests/demo.py" compare "$@"
     ;;
-  scenarios|privileged)
-    python3 "$project/tests/demo.py" prepare
-    bash "$project/build.sh" build
-    cli="${DBACKUP_BUILD_DIR:-$project/out/build-test}/BackupToolTestCli"
-    if [[ "$command_name" == privileged ]]; then
-      demo_root="${DBACKUP_DEMO_ROOT:-$HOME/DBackup-Demo}"
-      exec sudo -- python3 "$project/tests/demo.py" scenarios --root "$demo_root" --cli "$cli"
-    fi
-    exec python3 "$project/tests/demo.py" scenarios --cli "$cli"
+  help|-h|--help)
+    cat <<'EOF'
+用法:
+  bash tests/demo.sh compare <filters|large-data|special-files> <恢复目录>
+
+compare 报告写入 DBACKUP_BUILD_DIR/demo-reports。
+EOF
     ;;
-  compare) shift; exec python3 "$project/tests/demo.py" compare "$@" ;;
-  *) printf '用法: bash tests/demo.sh [prepare|run|scenarios|privileged|compare 恢复目录]\n' >&2; exit 2 ;;
+  *) printf '未知命令：%s\n运行 bash tests/demo.sh help 查看用法。\n' "$command_name" >&2; exit 2 ;;
 esac

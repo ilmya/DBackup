@@ -58,7 +58,7 @@ def main() -> int:
         print("The test build is missing. Run `./build.sh test` first.", file=sys.stderr)
         return 2
 
-    if "AcceptanceTestCliSmoke" in pattern or "DBackupRemoteClientServerE2E" in pattern:
+    if "AcceptanceTestCliSmoke" in pattern:
         generated = subprocess.run([ctest, "--test-dir", str(build_dir), "-R", "^AcceptanceFixtureGenerate$",
                                     "--output-on-failure"], cwd=ROOT)
         if generated.returncode:

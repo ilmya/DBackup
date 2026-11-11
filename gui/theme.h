@@ -1,6 +1,7 @@
 #pragma once
 #include <QString>
 namespace DBackupTheme {
+// 返回主窗口与对话框共用的应用内控件样式表。
 inline QString styleSheet() {
     return QStringLiteral(R"(
         * { color: #172033; }
@@ -30,4 +31,4 @@ inline QString styleSheet() {
         QTabBar[settingsActive="true"]::tab:selected { color: #64748b; font-weight: normal; }
     )");
 }
-}
+} // namespace DBackupTheme

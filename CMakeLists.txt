@@ -19,7 +19,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SECRET REQUIRED IMPORTED_TARGET libsecret-1)
 
 add_library(dbackup_core STATIC
-    core/archive.cpp core/archive_pipeline.cpp core/archive_tar.cpp core/compression.cpp core/md5.cpp core/crypto.cpp core/linux_file.cpp core/repository.cpp
+    core/archive.cpp core/archive_scan.cpp core/archive_format.cpp core/archive_restore.cpp core/filter_parser.cpp core/archive_pipeline.cpp core/archive_blocks.cpp core/archive_custom_stream.cpp core/archive_tar.cpp core/backup_policy.cpp core/compression.cpp core/md5.cpp core/crypto.cpp core/linux_file.cpp core/repository.cpp
     automation/cron.cpp automation/directory_watcher.cpp core/credential_store.cpp)
 target_include_directories(dbackup_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dbackup_core PUBLIC ZLIB::ZLIB OpenSSL::Crypto Threads::Threads PkgConfig::SECRET)
@@ -35,8 +35,7 @@ if(DBACKUP_BUILD_GUI)
 endif()
 
 if(BUILD_TESTS)
-    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-    add_subdirectory(third_party/googletest)
+    find_package(GTest REQUIRED)
     enable_testing()
     add_subdirectory(tests)
 endif()

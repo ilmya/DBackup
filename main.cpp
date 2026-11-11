@@ -4,7 +4,8 @@
 #include "gui/main_window.h"
 #include "gui/theme.h"
 
-int main(int argc, char *argv[]) {
+// 初始化 Qt 应用、主题和主窗口，并进入事件循环。
+int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
     QCoreApplication::setOrganizationName("DBackup Team");

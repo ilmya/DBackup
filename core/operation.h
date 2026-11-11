@@ -6,7 +6,15 @@
 #include <string>
 #include <vector>
 
-enum class OperationStage { Scanning, Reading, Compressing, Encrypting, Writing, Restoring, Completed };
+enum class OperationStage {
+    Scanning,
+    Reading,
+    Compressing,
+    Encrypting,
+    Writing,
+    Restoring,
+    Completed
+};
 
 struct OperationProgress {
     OperationStage stage = OperationStage::Scanning;
@@ -19,14 +27,25 @@ struct OperationProgress {
 };
 
 struct OperationContext {
-    std::atomic_bool *cancelled = nullptr;
-    std::function<void(const OperationProgress &)> onProgress;
+    std::atomic_bool* cancelled = nullptr;
+    std::function<void(const OperationProgress&)> onProgress;
     bool allowDeviceNodes = true;
     bool noReplace = false;
     bool includeSourceDirectory = false;
-    std::vector<std::string> *warnings = nullptr;
+    std::vector<std::string>* warnings = nullptr;
 
-    bool isCancelled() const { return cancelled && cancelled->load(); }
-    void report(const OperationProgress &progress) const { if (onProgress) onProgress(progress); }
-    void warn(const std::string &message) const { if (warnings) warnings->push_back(message); }
+    // 查询调用方是否请求取消当前操作。
+    bool isCancelled() const {
+        return cancelled && cancelled->load();
+    }
+    // 存在进度回调时向界面或调用方报告当前阶段。
+    void report(const OperationProgress& progress) const {
+        if (onProgress)
+            onProgress(progress);
+    }
+    // 将可恢复问题写入警告列表，供部分完成报告使用。
+    void warn(const std::string& message) const {
+        if (warnings)
+            warnings->push_back(message);
+    }
 };

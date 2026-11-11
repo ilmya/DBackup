@@ -19,10 +19,13 @@ struct Metadata {
     uint32_t deviceMinor = 0;
 };
 
-bool readMetadata(const std::filesystem::path &path, Metadata &metadata, std::string &error);
-bool validRelativePath(const std::filesystem::path &path);
-// Returns an open descriptor owned by the caller, or -1 on failure.
-int openDirectory(const std::filesystem::path &path, bool create, std::string &error);
-bool ensureDirectories(const std::filesystem::path &path, std::string &error);
+// 使用 lstat 读取对象自身的 POSIX 类型、属主、权限、时间和链接信息。
+bool readMetadata(const std::filesystem::path& path, Metadata& metadata, std::string& error);
+// 仅接受非绝对且不包含父目录跳转的归档相对路径。
+bool validRelativePath(const std::filesystem::path& path);
+// 安全打开目录描述符；成功后由调用方关闭，失败返回 -1。
+int openDirectory(const std::filesystem::path& path, bool create, std::string& error);
+// 逐级创建目录并拒绝经过符号链接穿越目标边界。
+bool ensureDirectories(const std::filesystem::path& path, std::string& error);
 
-}  // namespace dbackup::linux_file
+} // namespace dbackup::linux_file

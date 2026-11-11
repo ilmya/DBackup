@@ -1,1031 +1,676 @@
+#include "core/archive.h"
 #include "core/archive_internal.h"
-
-
-
-#include <fnmatch.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <pwd.h>
-#include <sys/stat.h>
-#include <sys/sysmacros.h>
-#include <sys/syscall.h>
-#include <algorithm>
-#include <cerrno>
-#include <cstring>
-#include <map>
-#include <set>
-
-namespace dbackup::archive_scan {
-namespace fs = std::filesystem;
-namespace {
-
-bool selectedSourcePath(const fs::path &path, const FilterOptions &filter) {
-    if (filter.sourceRules.empty()) return true;
-    const auto absolute = fs::absolute(path).lexically_normal();
-    size_t best = 0;
-    bool selected = false;
-    for (const auto &rule : filter.sourceRules) {
-        const auto root = fs::path(rule.path).lexically_normal();
-        const auto relative = absolute.lexically_relative(root);
-        if (absolute != root && (relative.empty() || *relative.begin() == "..")) continue;
-        const size_t depth = std::distance(root.begin(), root.end());
-        if (depth >= best) { best = depth; selected = rule.include; }
-    }
-    return selected;
-}
-bool mayContainSelected(const fs::path &path, const FilterOptions &filter) {
-    if (selectedSourcePath(path, filter)) return true;
-    const auto root = fs::absolute(path).lexically_normal();
-    for (const auto &rule : filter.sourceRules) {
-        if (!rule.include) continue;
-        const auto relative = fs::path(rule.path).lexically_relative(root);
-        if (!relative.empty() && *relative.begin() != "..") return true;
-    }
-    return false;
-}
-bool permissionFailure(int value) { return value == EACCES || value == EPERM; }
-
-std::string lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
-    return value;
-}
-
-bool matches(const Entry &entry, const FilterOptions &filter, const fs::path &filterPath) {
-    const bool directory = entry.type == 1;
-    const unsigned category = entry.type == 0 && entry.metadata.links > 1 ? 3 : entry.type;
-    if (!(filter.typeMask & (1u << category))) return false;
-    if (filter.type == EntryTypeFilter::FilesOnly && directory) return false;
-    if (filter.type == EntryTypeFilter::DirectoriesOnly && !directory) return false;
-    const auto path = lower(filterPath.generic_string());
-    const auto name = lower(filterPath.filename().string());
-    bool includes = false, included = false;
-    for (const auto &rule : filter.pathRules) {
-        includes |= rule.include;
-        if (fnmatch(lower(rule.pattern).c_str(), path.c_str(), 0) == 0) {
-            if (!rule.include) return false;
-            included = true;
-        }
-    }
-    if (includes && !included) return false;
-    if (!filter.pathContains.empty() && path.find(lower(filter.pathContains)) == std::string::npos) return false;
-    if (!filter.nameContains.empty() && name.find(lower(filter.nameContains)) == std::string::npos) return false;
-    if (!filter.ownerContains.empty() && lower(entry.owner).find(lower(filter.ownerContains)) == std::string::npos) return false;
-    if (!directory) {
-        std::vector<std::string> extensions = filter.extensions;
-        if (extensions.empty() && !filter.extension.empty()) extensions.push_back(filter.extension);
-        if (!extensions.empty()) {
-            bool found = false;
-            for (auto extension : extensions) {
-                extension = lower(extension);
-                if (!extension.empty() && extension[0] != '.') extension.insert(extension.begin(), '.');
-                if (!extension.empty() && name.size() >= extension.size() &&
-                    name.compare(name.size() - extension.size(), extension.size(), extension) == 0) found = true;
-            }
-            if (!found) return false;
-        }
-    }
-    if (filter.minSize && entry.metadata.size < filter.minSize) return false;
-    if (filter.maxSize && entry.metadata.size > filter.maxSize) return false;
-    const auto mtime = entry.metadata.mtimeNs / 1000000;
-    if (filter.afterMtimeMs && mtime < filter.afterMtimeMs) return false;
-    if (filter.beforeMtimeMs && mtime > filter.beforeMtimeMs) return false;
-    return true;
-}
-
-void addPreview(BackupPreview &result, const Entry &entry, bool included) {
-    const unsigned category = entry.type == 0 && entry.metadata.links > 1 ? 3 : entry.type;
-    if (included) ++result.includedTypes[category]; else ++result.excludedTypes[category];
-    const uint64_t bytes = entry.type == 0 ? entry.metadata.size : 0;
-    if (entry.type == 1) {
-        if (included) ++result.includedDirectories; else ++result.excludedDirectories;
-    } else if (included) {
-        ++result.includedFiles; result.includedBytes += bytes;
-    } else {
-        ++result.excludedFiles; result.excludedBytes += bytes;
-    }
-}
-}
-
-bool collect(const std::vector<std::string> &sources, const fs::path &excluded,
-             const FilterOptions &filter, std::vector<Entry> &entries,
-             BackupPreview *preview, const OperationContext &context, std::string &error, bool includeSingleDirectoryRoot) {
-    entries.clear();
-    if (preview) *preview = {};
-    if (context.isCancelled()) { error = "操作已取消"; return false; }
-    if (!ValidateFilterOptions(filter, error)) return false;
-    if (sources.empty()) { error = "请至少选择一个备份来源"; return false; }
-    std::error_code ec;
-    const fs::path excludedAbsolute = excluded.empty() ? fs::path() : fs::absolute(excluded, ec).lexically_normal();
-    if (ec) { error = ec.message(); return false; }
-    std::set<fs::path> uniqueSources;
-    std::set<std::string> names;
-    std::map<std::pair<uint64_t, uint64_t>, std::string> hardlinks;
-    auto process = [&](const fs::path &path, const fs::path &relative, const fs::path &filterRelative, bool forceDirectory) {
-        if (context.isCancelled()) { error = "操作已取消"; return false; }
-        if (!excludedAbsolute.empty() && fs::absolute(path, ec).lexically_normal() == excludedAbsolute) return true;
-        if (ec) { error = ec.message(); return false; }
-        if (!selectedSourcePath(path, filter)) return true;
-        Entry entry; entry.source = path; entry.relativePath = relative.generic_string();
-        if (!linux_file::readMetadata(path, entry.metadata, error)) {
-            if (permissionFailure(errno)) { context.warn(error); error.clear(); return true; }
-            return false;
-        }
-        if (S_ISDIR(entry.metadata.mode)) entry.type = 1;
-        else if (S_ISLNK(entry.metadata.mode)) entry.type = 2;
-        else if (S_ISFIFO(entry.metadata.mode)) entry.type = 4;
-        else if (S_ISCHR(entry.metadata.mode)) entry.type = 5;
-        else if (S_ISBLK(entry.metadata.mode)) entry.type = 6;
-        else if (S_ISSOCK(entry.metadata.mode)) entry.type = 7;
-        else if (!S_ISREG(entry.metadata.mode)) { error = "不支持的文件类型: " + path.string(); return false; }
-        if (const passwd *owner = getpwuid(entry.metadata.uid)) entry.owner = owner->pw_name;
-        const bool selected = forceDirectory || matches(entry, filter, filterRelative);
-        if (preview && selected && entry.type == 0) {
-            int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-            if (fd < 0 && permissionFailure(errno)) {
-                ++preview->unreadableFiles;
-                context.warn("无法读取文件: " + path.string() + ": " + std::strerror(errno));
-            } else if (fd >= 0) close(fd);
-        }
-        if (preview) addPreview(*preview, entry, selected);
-        if (!selected) return true;
-        if (!linux_file::validRelativePath(relative) || !names.insert(entry.relativePath).second) {
-            error = "备份来源包含无效或重复路径: " + entry.relativePath; return false;
-        }
-        if (entry.type == 2) {
-            entry.linkTarget = fs::read_symlink(path, ec).generic_string();
-            if (ec) { error = "无法读取符号链接: " + path.string() + ": " + ec.message(); return false; }
-        } else if (entry.type == 0 && entry.metadata.links > 1) {
-            const auto key = std::make_pair(entry.metadata.device, entry.metadata.inode);
-            auto [it, inserted] = hardlinks.emplace(key, entry.relativePath);
-            if (!inserted) { entry.type = 3; entry.linkTarget = it->second; }
-        }
-        entries.push_back(std::move(entry));
-        return true;
-    };
-    for (const auto &source : sources) {
-        fs::path absolute = fs::absolute(source, ec).lexically_normal();
-        if (ec) { error = ec.message(); return false; }
-        if (!excludedAbsolute.empty() && absolute == excludedAbsolute) {
-            error = "备份源不能同时作为输出文件: " + source; return false;
-        }
-        if (!uniqueSources.insert(absolute).second) continue;
-        linux_file::Metadata metadata;
-        if (!linux_file::readMetadata(absolute, metadata, error)) {
-            if (permissionFailure(errno)) { context.warn(error); error.clear(); continue; }
-            return false;
-        }
-        const bool directory = S_ISDIR(metadata.mode);
-        const bool rootIncluded = includeSingleDirectoryRoot || sources.size() > 1 || !directory;
-        fs::path rootName = absolute.filename();
-        if (rootIncluded && rootName.empty()) { error = "无法使用文件系统根目录作为多个来源之一"; return false; }
-        if (rootIncluded && !process(absolute, rootName, rootName, directory)) return false;
-        if (!directory) continue;
-        std::function<bool(const fs::path &)> walk = [&](const fs::path &directoryPath) {
-            std::error_code scanError;
-            fs::directory_iterator it(directoryPath, fs::directory_options::none, scanError), end;
-            if (scanError) {
-                if (permissionFailure(scanError.value())) { context.warn(directoryPath.string() + ": " + scanError.message()); return true; }
-                error = "无法扫描目录: " + directoryPath.string() + ": " + scanError.message(); return false;
-            }
-            while (it != end) {
-                const fs::path child = it->path();
-                fs::path filterRelative = child.lexically_relative(absolute);
-                fs::path relative = rootIncluded ? rootName / filterRelative : filterRelative;
-                if (sources.size() > 1) filterRelative = rootName / filterRelative;
-                if (!process(child, relative, filterRelative, false)) return false;
-                const auto status = it->symlink_status(scanError);
-                if (scanError) {
-                    if (permissionFailure(scanError.value())) context.warn(child.string() + ": " + scanError.message());
-                    else { error = child.string() + ": " + scanError.message(); return false; }
-                    scanError.clear();
-                } else if (fs::is_directory(status) && mayContainSelected(child, filter) && !walk(child)) return false;
-                it.increment(scanError);
-                if (scanError) { error = "扫描目录失败: " + directoryPath.string() + ": " + scanError.message(); return false; }
-            }
-            return true;
-        };
-        if (!walk(absolute)) return false;
-    }
-    return true;
-}
-}  // namespace dbackup::archive_scan
-
-bool ValidateFilterOptions(const FilterOptions &filter, std::string &error) {
-    if (static_cast<unsigned>(filter.type) > static_cast<unsigned>(EntryTypeFilter::DirectoriesOnly)) {
-        error = "文件类型条件无效"; return false;
-    }
-    if (filter.maxSize && filter.minSize > filter.maxSize) {
-        error = "最小文件大小不能大于最大文件大小"; return false;
-    }
-    if (filter.afterMtimeMs && filter.beforeMtimeMs && filter.afterMtimeMs > filter.beforeMtimeMs) {
-        error = "开始日期不能晚于结束日期"; return false;
-    }
-    for (const auto &rule : filter.pathRules) {
-        if (rule.pattern.empty()) { error = "路径规则不能为空"; return false; }
-    }
-    for (const auto &rule : filter.sourceRules) {
-        const std::filesystem::path path(rule.path);
-        if (!path.is_absolute() || path.lexically_normal() != path) { error = "来源选择路径无效"; return false; }
-    }
-    error.clear();
-    return true;
-}
-
+#include "core/archive_blocks.h"
+#include "core/archive_custom_stream.h"
+#include "core/archive_tar.h"
+#include "core/backup_policy.h"
 #include "core/crypto.h"
 
-#include <zlib.h>
-#include <algorithm>
-#include <cstring>
-#include <limits>
-
-namespace dbackup::archive_format {
-namespace {
-constexpr uint8_t magic[] = {'D','B','L','I','N','0','0','2'};
-constexpr size_t digestSize = 32, saltSize = 16, nonceSize = 12, tagSize = 16;
-constexpr uint64_t maxEntries = 10000000;
-
-void put64(std::vector<uint8_t> &out, uint64_t value) {
-    for (int i = 0; i < 8; ++i) out.push_back(static_cast<uint8_t>(value >> (8 * i)));
-}
-void putBytes(std::vector<uint8_t> &out, const uint8_t *data, size_t size) {
-    put64(out, size);
-    if (size) out.insert(out.end(), data, data + size);
-}
-void putString(std::vector<uint8_t> &out, const std::string &value) {
-    putBytes(out, reinterpret_cast<const uint8_t *>(value.data()), value.size());
-}
-struct Reader {
-    const std::vector<uint8_t> &bytes;
-    size_t offset = 0;
-    bool integer(uint64_t &value) {
-        if (bytes.size() - offset < 8) return false;
-        value = 0;
-        for (int i = 0; i < 8; ++i) value |= uint64_t(bytes[offset++]) << (8 * i);
-        return true;
-    }
-    bool data(std::vector<uint8_t> &value) {
-        uint64_t size = 0;
-        if (!integer(size) || size > bytes.size() - offset) return false;
-        value.assign(bytes.begin() + offset, bytes.begin() + offset + static_cast<size_t>(size));
-        offset += static_cast<size_t>(size);
-        return true;
-    }
-    bool string(std::string &value) {
-        std::vector<uint8_t> dataValue;
-        if (!data(dataValue)) return false;
-        value.assign(dataValue.begin(), dataValue.end());
-        return value.find('\0') == std::string::npos;
-    }
-};
-bool derive(const std::string &password, const std::vector<uint8_t> &salt, std::vector<uint8_t> &key) {
-    key.resize(32);
-    return crypto::pbkdf2Sha256(password, salt, crypto::kDefaultPbkdf2Iterations, key);
-}
-}
-
-bool encode(const std::vector<Entry> &entries, int compressionLevel, const std::string &password,
-            std::vector<uint8_t> &output, std::string &error) {
-    if (entries.size() > maxEntries) { error = "归档条目过多"; return false; }
-    std::vector<uint8_t> body;
-    put64(body, entries.size());
-    for (const auto &entry : entries) {
-        const auto &file = entry.file;
-        if (file.type > 7 || !linux_file::validRelativePath(file.relativePath)) {
-            error = "归档条目路径或类型无效: " + file.relativePath; return false;
-        }
-        if (file.type != 0 && !entry.data.empty()) { error = "非普通文件包含数据"; return false; }
-        put64(body, file.type);
-        putString(body, file.relativePath);
-        put64(body, file.metadata.mode);
-        put64(body, file.metadata.uid);
-        put64(body, file.metadata.gid);
-        put64(body, static_cast<uint64_t>(file.metadata.mtimeNs));
-        put64(body, file.metadata.deviceMajor);
-        put64(body, file.metadata.deviceMinor);
-        putString(body, file.owner);
-        putString(body, file.linkTarget);
-        put64(body, entry.data.size());
-        std::vector<uint8_t> compressed;
-        bool useCompression = false;
-        if (!entry.data.empty() && entry.data.size() <= std::numeric_limits<uLong>::max()) {
-            uLongf size = compressBound(static_cast<uLong>(entry.data.size()));
-            compressed.resize(size);
-            if (compress2(compressed.data(), &size, entry.data.data(), static_cast<uLong>(entry.data.size()),
-                          std::clamp(compressionLevel, 0, 9)) != Z_OK) {
-                error = "压缩文件失败: " + file.relativePath; return false;
-            }
-            compressed.resize(size);
-            useCompression = compressed.size() < entry.data.size();
-        }
-        put64(body, useCompression ? 1 : 0);
-        const auto &payload = useCompression ? compressed : entry.data;
-        putBytes(body, payload.data(), payload.size());
-    }
-    std::vector<uint8_t> digest;
-    if (!crypto::sha256(body.data(), body.size(), digest)) { error = "无法计算归档校验值"; return false; }
-    body.insert(body.end(), digest.begin(), digest.end());
-    output.assign(std::begin(magic), std::end(magic));
-    output.push_back(password.empty() ? 0 : 1);
-    if (!password.empty()) {
-        std::vector<uint8_t> salt, nonce, tag, key, ciphertext;
-        if (!crypto::randomBytes(salt, saltSize) || !crypto::randomBytes(nonce, nonceSize) ||
-            !derive(password, salt, key) || !crypto::aes256Gcm(true, body, key, nonce, tag, ciphertext)) {
-            error = "归档加密失败"; output.clear(); return false;
-        }
-        output.insert(output.end(), salt.begin(), salt.end());
-        output.insert(output.end(), nonce.begin(), nonce.end());
-        output.insert(output.end(), tag.begin(), tag.end());
-        output.insert(output.end(), ciphertext.begin(), ciphertext.end());
-    } else output.insert(output.end(), body.begin(), body.end());
-    return true;
-}
-
-bool decode(const std::vector<uint8_t> &input, const std::string &password,
-            std::vector<Entry> &entries, std::string &error) {
-    entries.clear();
-    if (input.size() < sizeof(magic) + 1 || !std::equal(std::begin(magic), std::end(magic), input.begin())) {
-        error = "不是当前 Linux 版本支持的归档格式"; return false;
-    }
-    size_t offset = sizeof(magic);
-    const uint8_t encrypted = input[offset++];
-    if (encrypted > 1) { error = "归档标志无效"; return false; }
-    std::vector<uint8_t> body;
-    if (encrypted) {
-        if (password.empty() || input.size() - offset < saltSize + nonceSize + tagSize) {
-            error = "归档需要密码或数据不完整"; return false;
-        }
-        std::vector<uint8_t> salt(input.begin() + offset, input.begin() + offset + saltSize); offset += saltSize;
-        std::vector<uint8_t> nonce(input.begin() + offset, input.begin() + offset + nonceSize); offset += nonceSize;
-        std::vector<uint8_t> tag(input.begin() + offset, input.begin() + offset + tagSize); offset += tagSize;
-        std::vector<uint8_t> ciphertext(input.begin() + offset, input.end()), key;
-        if (!derive(password, salt, key) || !crypto::aes256Gcm(false, ciphertext, key, nonce, tag, body)) {
-            error = "密码错误或归档已损坏"; return false;
-        }
-    } else body.assign(input.begin() + offset, input.end());
-    if (body.size() < digestSize) { error = "归档数据不完整"; return false; }
-    std::vector<uint8_t> actual;
-    if (!crypto::sha256(body.data(), body.size() - digestSize, actual) ||
-        !std::equal(actual.begin(), actual.end(), body.end() - digestSize)) {
-        error = "归档校验失败"; return false;
-    }
-    body.resize(body.size() - digestSize);
-    Reader reader{body};
-    uint64_t count = 0;
-    if (!reader.integer(count) || count > maxEntries) { error = "归档条目数量无效"; return false; }
-    for (uint64_t i = 0; i < count; ++i) {
-        Entry entry; uint64_t type, mode, uid, gid, mtime, majorNumber, minorNumber, size, compressed;
-        if (!reader.integer(type) || type > 7 || !reader.string(entry.file.relativePath) ||
-            !linux_file::validRelativePath(entry.file.relativePath) || !reader.integer(mode) ||
-            !reader.integer(uid) || !reader.integer(gid) || !reader.integer(mtime) ||
-            !reader.integer(majorNumber) || !reader.integer(minorNumber) ||
-            mode > UINT32_MAX || uid > UINT32_MAX || gid > UINT32_MAX ||
-            majorNumber > UINT32_MAX || minorNumber > UINT32_MAX ||
-            ((type != 5 && type != 6) && (majorNumber || minorNumber)) ||
-            !reader.string(entry.file.owner) || !reader.string(entry.file.linkTarget) ||
-            !reader.integer(size) || !reader.integer(compressed) || compressed > 1 ||
-            !reader.data(entry.data)) { error = "归档条目无效"; entries.clear(); return false; }
-        entry.compressed = compressed != 0;
-        entry.file.type = static_cast<uint8_t>(type);
-        entry.file.metadata.mode = static_cast<uint32_t>(mode);
-        entry.file.metadata.uid = static_cast<uint32_t>(uid);
-        entry.file.metadata.gid = static_cast<uint32_t>(gid);
-        entry.file.metadata.mtimeNs = static_cast<int64_t>(mtime);
-        entry.file.metadata.deviceMajor = static_cast<uint32_t>(majorNumber);
-        entry.file.metadata.deviceMinor = static_cast<uint32_t>(minorNumber);
-        entry.file.metadata.size = size;
-        const mode_t kind = static_cast<mode_t>(mode);
-        if ((type == 0 && !S_ISREG(kind)) || (type == 1 && !S_ISDIR(kind)) ||
-            (type == 2 && !S_ISLNK(kind)) || (type == 3 && !S_ISREG(kind)) ||
-            (type == 4 && !S_ISFIFO(kind)) || (type == 5 && !S_ISCHR(kind)) ||
-            (type == 6 && !S_ISBLK(kind)) || (type == 7 && !S_ISSOCK(kind))) {
-            error = "归档文件类型与元数据不一致"; entries.clear(); return false;
-        }
-        if (type != 0 && (size || !entry.data.empty() || compressed)) {
-            error = "非普通文件包含数据"; entries.clear(); return false;
-        }
-        if (compressed) {
-            if (size > std::numeric_limits<uLongf>::max() || size > entry.data.max_size() ||
-                entry.data.size() > std::numeric_limits<uLong>::max()) {
-                error = "归档文件过大"; entries.clear(); return false;
-            }
-            std::vector<uint8_t> plain(static_cast<size_t>(size));
-            uLongf decodedSize = static_cast<uLongf>(size);
-            if (uncompress(plain.data(), &decodedSize, entry.data.data(),
-                           static_cast<uLong>(entry.data.size())) != Z_OK || decodedSize != size) {
-                error = "归档解压失败"; entries.clear(); return false;
-            }
-            entry.data = std::move(plain);
-        } else if (entry.data.size() != size) { error = "归档文件长度不匹配"; entries.clear(); return false; }
-        entries.push_back(std::move(entry));
-    }
-    if (reader.offset != body.size()) { error = "归档包含多余数据"; entries.clear(); return false; }
-    return true;
-}
-}  // namespace dbackup::archive_format
-
-
-
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <cerrno>
-#include <cstring>
-#include <set>
-#include <utility>
-
-namespace dbackup::archive_restore {
-namespace fs = std::filesystem;
-namespace {
-class FileDescriptor {
-public:
-    explicit FileDescriptor(int fd = -1) : fd_(fd) {}
-    ~FileDescriptor() { if (fd_ >= 0) close(fd_); }
-    FileDescriptor(const FileDescriptor &) = delete;
-    FileDescriptor &operator=(const FileDescriptor &) = delete;
-    FileDescriptor(FileDescriptor &&other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
-    FileDescriptor &operator=(FileDescriptor &&other) noexcept {
-        if (this != &other) { if (fd_ >= 0) close(fd_); fd_ = std::exchange(other.fd_, -1); }
-        return *this;
-    }
-    int get() const { return fd_; }
-private:
-    int fd_;
-};
-
-bool fail(const std::string &path, std::string &error) {
-    error = path + ": " + std::strerror(errno);
-    return false;
-}
-bool recoverableError(int value) {
-    return value == EACCES || value == EPERM || value == ENOTSUP || value == EOPNOTSUPP;
-}
-bool metadataFailure(const std::string &path, std::string &warnings) {
-    if (!recoverableError(errno)) return fail(path, warnings);
-    if (!warnings.empty()) warnings += "\n";
-    warnings += path + ": 元数据未完整恢复: " + std::strerror(errno);
-    return true;
-}
-
-// Resolve each component relative to an already-open directory, never following links.
-FileDescriptor directoryAt(int root, const fs::path &path, bool create, std::string &error) {
-    FileDescriptor current(dup(root));
-    if (current.get() < 0) { fail(path.string(), error); return FileDescriptor(); }
-    for (const auto &part : path) {
-        if (part == "." || part.empty()) continue;
-        int next = openat(current.get(), part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (next < 0 && errno == ENOENT && create) {
-            if (mkdirat(current.get(), part.c_str(), 0700) != 0 && errno != EEXIST) {
-                fail(path.string(), error); return FileDescriptor();
-            }
-            next = openat(current.get(), part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        }
-        if (next < 0) { fail(path.string(), error); return FileDescriptor(); }
-        current = FileDescriptor(next);
-    }
-    return current;
-}
-
-timespec modificationTime(int64_t nanos) {
-    timespec value{nanos / 1000000000LL, nanos % 1000000000LL};
-    if (value.tv_nsec < 0) { --value.tv_sec; value.tv_nsec += 1000000000; }
-    return value;
-}
-
-void verifyMetadata(const struct stat &actual, const linux_file::Metadata &expected,
-                    const std::string &path, bool symlink, std::string &warnings) {
-    const int64_t actualMtime = int64_t(actual.st_mtim.tv_sec) * 1000000000LL + actual.st_mtim.tv_nsec;
-    std::string fields;
-    if (actual.st_uid != expected.uid || actual.st_gid != expected.gid) fields += "属主/属组 ";
-    if (!symlink && (actual.st_mode & 07777) != (expected.mode & 07777)) fields += "权限 ";
-    if (actualMtime != expected.mtimeNs) fields += "修改时间 ";
-    if (!fields.empty()) {
-        if (!warnings.empty()) warnings += "\n";
-        warnings += path + ": 目标文件系统未保留 " + fields;
-    }
-}
-
-bool metadataFd(int fd, const linux_file::Metadata &metadata, const std::string &path, std::string &error) {
-    if (fchown(fd, metadata.uid, metadata.gid) != 0 && !metadataFailure(path, error)) return false;
-    if (fchmod(fd, metadata.mode & 07777) != 0 && !metadataFailure(path, error)) return false;
-    timespec times[2]{{0, UTIME_OMIT}, modificationTime(metadata.mtimeNs)};
-    if (futimens(fd, times) != 0 && !metadataFailure(path, error)) return false;
-    struct stat actual{};
-    if (fstat(fd, &actual) != 0) return fail(path, error);
-    verifyMetadata(actual, metadata, path, false, error);
-    return true;
-}
-
-bool metadataLink(int parent, const std::string &name, const linux_file::Metadata &metadata,
-                  const std::string &path, std::string &error) {
-    if (fchownat(parent, name.c_str(), metadata.uid, metadata.gid, AT_SYMLINK_NOFOLLOW) != 0 && !metadataFailure(path, error)) return false;
-    timespec times[2]{{0, UTIME_OMIT}, modificationTime(metadata.mtimeNs)};
-    if (utimensat(parent, name.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0 && !metadataFailure(path, error)) return false;
-    struct stat actual{};
-    if (fstatat(parent, name.c_str(), &actual, AT_SYMLINK_NOFOLLOW) != 0) return fail(path, error);
-    verifyMetadata(actual, metadata, path, true, error);
-    return true;
-}
-
-int chmodNoFollow(int parent, const char *name, mode_t mode) {
-#if defined(SYS_fchmodat2)
-    if (syscall(SYS_fchmodat2, parent, name, mode, AT_SYMLINK_NOFOLLOW) == 0) return 0;
-    if (errno != ENOSYS) return -1;
-#elif defined(__x86_64__) || defined(__aarch64__)
-    // Ubuntu 22.04 headers predate fchmodat2, but newer Linux kernels provide it.
-    if (syscall(452, parent, name, mode, AT_SYMLINK_NOFOLLOW) == 0) return 0;
-    if (errno != ENOSYS) return -1;
-#endif
-    return fchmodat(parent, name, mode, AT_SYMLINK_NOFOLLOW);
-}
-
-bool writeFile(int parent, const std::string &name, const archive_format::Entry &entry,
-               const OperationContext &context, std::string &error) {
-    std::string temp;
-    FileDescriptor output;
-    for (unsigned i = 0; i < 100; ++i) {
-        temp = ".dbackup-" + std::to_string(getpid()) + "-" + std::to_string(i) + ".tmp";
-        int fd = openat(parent, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (fd >= 0) { output = FileDescriptor(fd); break; }
-        if (errno != EEXIST) return fail(entry.file.relativePath, error);
-    }
-    if (output.get() < 0) { error = "无法创建恢复临时文件: " + entry.file.relativePath; return false; }
-    size_t offset = 0;
-    while (offset < entry.data.size()) {
-        if (context.isCancelled()) { error = "操作已取消"; unlinkat(parent, temp.c_str(), 0); return false; }
-        ssize_t written = write(output.get(), entry.data.data() + offset, entry.data.size() - offset);
-        if (written < 0 && errno == EINTR) continue;
-        if (written <= 0) { fail(entry.file.relativePath, error); unlinkat(parent, temp.c_str(), 0); return false; }
-        offset += static_cast<size_t>(written);
-    }
-    if (!metadataFd(output.get(), entry.file.metadata, entry.file.relativePath, error)) {
-        unlinkat(parent, temp.c_str(), 0); return false;
-    }
-    if (fsync(output.get()) != 0) {
-        fail(entry.file.relativePath, error);
-        unlinkat(parent, temp.c_str(), 0); return false;
-    }
-    if (renameat(parent, temp.c_str(), parent, name.c_str()) != 0) {
-        fail(entry.file.relativePath, error); unlinkat(parent, temp.c_str(), 0); return false;
-    }
-    return true;
-}
-}
-
-bool restore(const std::vector<archive_format::Entry> &entries, const fs::path &destination,
-             const OperationContext &context, std::string &error) {
-    error.clear();
-    std::set<std::string> paths, regularFiles;
-    for (const auto &entry : entries) {
-        const auto &file = entry.file;
-        fs::path path(file.relativePath);
-        if (!linux_file::validRelativePath(path) || file.type > 7 || !paths.insert(file.relativePath).second) {
-            error = "归档包含重复或不安全的路径: " + file.relativePath; return false;
-        }
-        if (file.type == 2) {
-            fs::path target(file.linkTarget);
-            fs::path resolved = (path.parent_path() / target).lexically_normal();
-            if (target.empty() || target.is_absolute() || !linux_file::validRelativePath(resolved)) {
-                error = "归档包含不安全的符号链接: " + file.relativePath; return false;
-            }
-        }
-        if (file.type == 3 && !regularFiles.count(file.linkTarget)) {
-            error = "硬链接目标不是先前的普通文件: " + file.linkTarget; return false;
-        }
-        if (file.type == 0) regularFiles.insert(file.relativePath);
-    }
-    if (context.isCancelled()) { error = "操作已取消"; return false; }
-    FileDescriptor root(linux_file::openDirectory(destination, true, error));
-    if (root.get() < 0) return false;
-    uint64_t completed = 0;
-    std::vector<std::string> warnings;
-    std::set<std::string> skippedDirectories, skippedPaths;
-    auto skip = [&](const std::string &path, const std::string &reason, bool directory) {
-        warnings.push_back(path + ": " + reason);
-        skippedPaths.insert(path);
-        if (directory) skippedDirectories.insert(path);
-    };
-    auto parentSkipped = [&](const fs::path &path) {
-        for (const auto &parent : skippedDirectories) {
-            auto relative = path.lexically_relative(parent);
-            if (!relative.empty() && *relative.begin() != "..") return true;
-        }
-        return false;
-    };
-    for (const auto &entry : entries) {
-        if (context.isCancelled()) { error = "操作已取消"; return false; }
-        const auto &file = entry.file;
-        fs::path path(file.relativePath);
-        if (parentSkipped(path)) { skip(file.relativePath, "上级目录未恢复", file.type == 1); continue; }
-        if ((file.type == 5 || file.type == 6) && !context.allowDeviceNodes) {
-            skip(file.relativePath, "设备节点恢复未启用", false); continue;
-        }
-        if (file.type == 3 && skippedPaths.count(file.linkTarget)) {
-            skip(file.relativePath, "硬链接目标未恢复", false); continue;
-        }
-        std::string detail;
-        errno = 0;
-        FileDescriptor parent = directoryAt(root.get(), path.parent_path(), true, detail);
-        if (parent.get() < 0) {
-            if (recoverableError(errno)) { skip(file.relativePath, detail, file.type == 1); continue; }
-            error = detail; return false;
-        }
-        const std::string name = path.filename().string();
-        bool ok = true;
-        if (file.type == 1) {
-            if (mkdirat(parent.get(), name.c_str(), 0700) != 0 && errno != EEXIST) ok = fail(file.relativePath, detail);
-            if (ok) {
-                FileDescriptor directory(openat(parent.get(), name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-                if (directory.get() < 0) ok = fail(file.relativePath, detail);
-            }
-        } else if (file.type == 0) {
-            ok = writeFile(parent.get(), name, entry, context, detail);
-        } else if (file.type == 2) {
-            if (symlinkat(file.linkTarget.c_str(), parent.get(), name.c_str()) != 0) ok = fail(file.relativePath, detail);
-            else ok = metadataLink(parent.get(), name, file.metadata, file.relativePath, detail);
-        } else if (file.type == 3) {
-            fs::path target(file.linkTarget);
-            FileDescriptor targetParent = directoryAt(root.get(), target.parent_path(), false, detail);
-            if (targetParent.get() < 0) ok = false;
-            else {
-                struct stat targetInfo{};
-                if (fstatat(targetParent.get(), target.filename().c_str(), &targetInfo, AT_SYMLINK_NOFOLLOW) != 0 ||
-                    !S_ISREG(targetInfo.st_mode)) { error = "硬链接目标不是普通文件: " + file.linkTarget; return false; }
-                if (linkat(targetParent.get(), target.filename().c_str(), parent.get(), name.c_str(), 0) != 0)
-                    ok = fail(file.relativePath, detail);
-            }
-        } else {
-            const mode_t type = file.type == 4 ? S_IFIFO : (file.type == 5 ? S_IFCHR : (file.type == 6 ? S_IFBLK : S_IFSOCK));
-            dev_t device = makedev(file.metadata.deviceMajor, file.metadata.deviceMinor);
-            if ((file.type == 5 || file.type == 6) &&
-                (major(device) != file.metadata.deviceMajor || minor(device) != file.metadata.deviceMinor)) {
-                error = "设备号无效: " + file.relativePath; return false;
-            }
-            if (mknodat(parent.get(), name.c_str(), type | (file.metadata.mode & 07777), device) != 0)
-                ok = fail(file.relativePath, detail);
-            else {
-                if (fchownat(parent.get(), name.c_str(), file.metadata.uid, file.metadata.gid, AT_SYMLINK_NOFOLLOW) != 0)
-                    ok = metadataFailure(file.relativePath, detail);
-                if (ok && chmodNoFollow(parent.get(), name.c_str(), file.metadata.mode & 07777) != 0)
-                    ok = metadataFailure(file.relativePath, detail);
-                timespec times[2]{{0, UTIME_OMIT}, modificationTime(file.metadata.mtimeNs)};
-                if (ok && utimensat(parent.get(), name.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0)
-                    ok = metadataFailure(file.relativePath, detail);
-                struct stat actual{};
-                if (ok && fstatat(parent.get(), name.c_str(), &actual, AT_SYMLINK_NOFOLLOW) != 0)
-                    ok = fail(file.relativePath, detail);
-                if (ok) verifyMetadata(actual, file.metadata, file.relativePath, false, detail);
-                if (ok && file.type == 7) {
-                    if (!detail.empty()) detail += "\\n";
-                    detail += file.relativePath + ": 套接字节点不包含原服务或连接，可能占用服务路径";
-                }
-            }
-        }
-        if (!ok) {
-            const int cause = errno;
-            if (!context.isCancelled() && (recoverableError(cause) || (file.type == 7 && cause == EEXIST))) {
-                skip(file.relativePath, detail, file.type == 1); continue;
-            }
-            error = detail; return false;
-        }
-        if (!detail.empty()) warnings.push_back(detail);
-        OperationProgress progress; progress.stage = OperationStage::Restoring;
-        progress.currentPath = file.relativePath; progress.completedFiles = ++completed;
-        progress.totalFiles = entries.size(); context.report(progress);
-    }
-    for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-        if (it->file.type != 1 || skippedPaths.count(it->file.relativePath)) continue;
-        std::string detail;
-        FileDescriptor directory = directoryAt(root.get(), fs::path(it->file.relativePath), false, detail);
-        if (directory.get() < 0 || !metadataFd(directory.get(), it->file.metadata, it->file.relativePath, detail)) {
-            if (recoverableError(errno)) { warnings.push_back(detail); continue; }
-            error = detail; return false;
-        }
-        if (!detail.empty()) warnings.push_back(detail);
-    }
-    error.clear();
-    for (const auto &warning : warnings) { if (!error.empty()) error += "\\n"; error += warning; context.warn(warning); }
-    OperationProgress done; done.stage = OperationStage::Completed;
-    done.completedFiles = completed; done.totalFiles = entries.size(); context.report(done);
-    return true;
-}
-}  // namespace dbackup::archive_restore
-
-
-#include "core/archive.h"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
-#include <ctime>
-#include <iomanip>
-#include <sstream>
-
-namespace {
-std::string Lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
-}
-
-bool ParseFilterOptions(const std::string &spec, FilterOptions &filter, std::string &error) {
-    filter = FilterOptions{};
-    error.clear();
-    auto trim = [](std::string value) {
-        const char *spaces = " \t\r\n";
-        size_t first = value.find_first_not_of(spaces);
-        if (first == std::string::npos) return std::string{};
-        size_t last = value.find_last_not_of(spaces);
-        return value.substr(first, last - first + 1);
-    };
-    auto parseSize = [&](const std::string &value, uint64_t &target, const std::string &key) {
-        if (value.empty() || value[0] == '-') {
-            error = "筛选项 " + key + " 必须是非负整数";
-            return false;
-        }
-        errno = 0;
-        char *end = nullptr;
-        unsigned long long number = std::strtoull(value.c_str(), &end, 10);
-        if (errno == ERANGE || end == value.c_str() || *end != '\0') {
-            error = "筛选项 " + key + " 必须是非负整数";
-            return false;
-        }
-        target = static_cast<uint64_t>(number);
-        return true;
-    };
-    auto parseDate = [&](const std::string &value, int64_t &target, const std::string &key, bool endOfDay) {
-        std::tm tm = {};
-        std::istringstream input(value);
-        input >> std::get_time(&tm, "%Y-%m-%d");
-        if (input.fail() || input.peek() != std::char_traits<char>::eof()) {
-            error = "筛选项 " + key + " 的日期格式应为 YYYY-MM-DD";
-            return false;
-        }
-        const int expectedYear = tm.tm_year;
-        const int expectedMonth = tm.tm_mon;
-        const int expectedDay = tm.tm_mday;
-        time_t seconds = timegm(&tm);
-        if (seconds == static_cast<time_t>(-1)) {
-            error = "筛选项 " + key + " 的日期无效";
-            return false;
-        }
-        std::tm check = {};
-        gmtime_r(&seconds, &check);
-        if (check.tm_year != expectedYear || check.tm_mon != expectedMonth || check.tm_mday != expectedDay) {
-            error = "筛选项 " + key + " 的日期无效";
-            return false;
-        }
-        target = static_cast<int64_t>(seconds) * 1000 + (endOfDay ? 86399999LL : 0LL);
-        return true;
-    };
-
-    std::stringstream stream(spec);
-    std::string part;
-    while (std::getline(stream, part, ';')) {
-        part = trim(part);
-        if (part.empty()) continue;
-        size_t equal = part.find('=');
-        if (equal == std::string::npos) {
-            error = "筛选项缺少等号: " + part;
-            return false;
-        }
-        std::string key = Lower(trim(part.substr(0, equal)));
-        std::string value = trim(part.substr(equal + 1));
-        if (key.empty() || value.empty()) {
-            error = "筛选项的名称和值不能为空: " + part;
-            return false;
-        }
-        if (key == "path") filter.pathContains = value;
-        else if (key == "name") filter.nameContains = value;
-        else if (key == "ext" || key == "extension") {
-            std::stringstream extensions(value);
-            std::string extension;
-            while (std::getline(extensions, extension, ',')) {
-                extension = trim(extension);
-                if (!extension.empty()) filter.extensions.push_back(extension);
-            }
-            if (filter.extensions.empty()) {
-                error = "筛选项 ext 至少需要一个扩展名";
-                return false;
-            }
-            if (filter.extensions.size() == 1) filter.extension = filter.extensions.front();
-        }
-        else if (key == "include" || key == "exclude") {
-            filter.pathRules.push_back(PathFilterRule{key == "include", value});
-        }
-        else if (key == "owner" || key == "user") filter.ownerContains = value;
-        else if (key == "type") {
-            std::string type = Lower(value);
-            if (type == "file" || type == "files") filter.type = EntryTypeFilter::FilesOnly;
-            else if (type == "dir" || type == "directory" || type == "directories") {
-                filter.type = EntryTypeFilter::DirectoriesOnly;
-            } else {
-                error = "筛选项 type 只支持 file 或 dir";
-                return false;
-            }
-        } else if (key == "minsize") {
-            if (!parseSize(value, filter.minSize, key)) return false;
-        } else if (key == "maxsize") {
-            if (!parseSize(value, filter.maxSize, key)) return false;
-        } else if (key == "after") {
-            if (!parseDate(value, filter.afterMtimeMs, key, false)) return false;
-        } else if (key == "before") {
-            if (!parseDate(value, filter.beforeMtimeMs, key, true)) return false;
-        } else {
-            error = "未知筛选项: " + key;
-            return false;
-        }
-    }
-    if (filter.minSize != 0 && filter.maxSize != 0 && filter.minSize > filter.maxSize) {
-        error = "minsize 不能大于 maxsize";
-        return false;
-    }
-    if (filter.afterMtimeMs != 0 && filter.beforeMtimeMs != 0 &&
-        filter.afterMtimeMs > filter.beforeMtimeMs) {
-        error = "after 不能晚于 before";
-        return false;
-    }
-    return true;
-}
-
-
-
-#include "core/archive.h"
-
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <fcntl.h>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
+#include <limits>
+#include <map>
+#include <new>
+#include <pwd.h>
+#include <set>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
+#include <unistd.h>
+#include <utility>
+#include <zlib.h>
 
 namespace {
 using dbackup::archive_format::Entry;
 namespace fs = std::filesystem;
 
-bool readSource(const dbackup::archive_scan::Entry &entry, std::vector<uint8_t> &data,
-                const OperationContext &context, std::string &error) {
+// 仅打开扫描阶段确认过的普通文件，并校验读取前后元数据未变化。
+bool readSource(const dbackup::archive_scan::Entry& entry, std::vector<uint8_t>& data,
+                const OperationContext& context, std::string& error, int output = -1) {
+    std::vector<char> buffer(4u * 1024u * 1024u);
     int fd = open(entry.source.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { error = "无法读取文件: " + entry.source.string() + ": " + std::strerror(errno); return false; }
-    struct stat info{};
+    if (fd < 0) {
+        error = "无法读取文件: " + entry.source.string() + ": " + std::strerror(errno);
+        return false;
+    }
+    struct stat info {};
     if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
-        uint64_t(info.st_dev) != entry.metadata.device || uint64_t(info.st_ino) != entry.metadata.inode ||
-        uint64_t(info.st_size) != entry.metadata.size || uint32_t(info.st_mode) != entry.metadata.mode ||
-        uint32_t(info.st_uid) != entry.metadata.uid || uint32_t(info.st_gid) != entry.metadata.gid ||
-        int64_t(info.st_mtim.tv_sec) * 1000000000LL + info.st_mtim.tv_nsec != entry.metadata.mtimeNs) {
-        close(fd); error = "扫描后文件已改变: " + entry.source.string(); return false;
+        uint64_t(info.st_dev) != entry.metadata.device ||
+        uint64_t(info.st_ino) != entry.metadata.inode ||
+        uint64_t(info.st_size) != entry.metadata.size ||
+        uint32_t(info.st_mode) != entry.metadata.mode ||
+        uint32_t(info.st_uid) != entry.metadata.uid ||
+        uint32_t(info.st_gid) != entry.metadata.gid ||
+        int64_t(info.st_mtim.tv_sec) * 1000000000LL + info.st_mtim.tv_nsec !=
+            entry.metadata.mtimeNs) {
+        close(fd);
+        error = "扫描后文件已改变: " + entry.source.string();
+        return false;
     }
-    char buffer[65536];
     for (;;) {
-        if (context.isCancelled()) { close(fd); error = "操作已取消"; return false; }
-        ssize_t count = read(fd, buffer, sizeof(buffer));
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) { error = "读取文件失败: " + entry.source.string() + ": " + std::strerror(errno); close(fd); return false; }
-        if (count == 0) break;
-        data.insert(data.end(), buffer, buffer + count);
+        if (context.isCancelled()) {
+            close(fd);
+            error = "操作已取消";
+            return false;
+        }
+        ssize_t count = read(fd, buffer.data(), buffer.size());
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0) {
+            error = "读取文件失败: " + entry.source.string() + ": " + std::strerror(errno);
+            close(fd);
+            return false;
+        }
+        if (count == 0)
+            break;
+        if (output < 0) {
+            data.insert(data.end(), buffer.data(), buffer.data() + count);
+        } else {
+            size_t written = 0;
+            while (written < static_cast<size_t>(count)) {
+                ssize_t n = write(output, buffer.data() + written, size_t(count) - written);
+                if (n < 0 && errno == EINTR)
+                    continue;
+                if (n <= 0) {
+                    error = "写入 tar 文件失败: " + std::string(std::strerror(errno));
+                    close(fd);
+                    return false;
+                }
+                written += static_cast<size_t>(n);
+            }
+        }
     }
-    struct stat end{};
-    const bool unchanged = fstat(fd, &end) == 0 && end.st_size == info.st_size &&
-        end.st_mode == info.st_mode && end.st_uid == info.st_uid && end.st_gid == info.st_gid &&
+    struct stat end {};
+    const bool unchanged =
+        fstat(fd, &end) == 0 && end.st_size == info.st_size && end.st_mode == info.st_mode &&
+        end.st_uid == info.st_uid && end.st_gid == info.st_gid &&
         end.st_mtim.tv_sec == info.st_mtim.tv_sec && end.st_mtim.tv_nsec == info.st_mtim.tv_nsec &&
         end.st_ctim.tv_sec == info.st_ctim.tv_sec && end.st_ctim.tv_nsec == info.st_ctim.tv_nsec;
     close(fd);
-    if (!unchanged) { error = "备份期间文件已改变: " + entry.source.string(); return false; }
+    if (!unchanged) {
+        error = "备份期间文件已改变: " + entry.source.string();
+        return false;
+    }
     return true;
 }
 
-bool readArchive(const std::string &path, std::vector<uint8_t> &data, std::string &error) {
+// 以二进制方式读取归档文件，失败时保留明确的文件路径错误。
+bool readArchive(const std::string& path, std::vector<uint8_t>& data, std::string& error) {
     std::ifstream input(path, std::ios::binary);
-    if (!input) { error = "无法打开归档: " + path; return false; }
+    if (!input) {
+        error = "无法打开归档: " + path;
+        return false;
+    }
     data.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-    if (input.bad()) { error = "读取归档失败: " + path; return false; }
+    if (input.bad()) {
+        error = "读取归档失败: " + path;
+        return false;
+    }
     return true;
 }
 
-bool writeArchive(const std::string &path, const std::vector<uint8_t> &data,
-                  const OperationContext &context, std::string &error) {
+// 在目标目录写入临时归档并同步磁盘，最后原子提交或拒绝覆盖。
+bool writeArchive(const std::string& path, const std::vector<uint8_t>& data,
+                  const OperationContext& context, std::string& error) {
     std::string temporary = path + ".tmp.XXXXXX";
-    std::vector<char> name(temporary.begin(), temporary.end()); name.push_back('\0');
+    std::vector<char> name(temporary.begin(), temporary.end());
+    name.push_back('\0');
     int fd = mkstemp(name.data());
-    if (fd < 0) { error = "无法创建临时归档: " + std::string(std::strerror(errno)); return false; }
+    if (fd < 0) {
+        error = "无法创建临时归档: " + std::string(std::strerror(errno));
+        return false;
+    }
     size_t written = 0;
     bool ok = true;
     while (written < data.size()) {
-        if (context.isCancelled()) { error = "操作已取消"; ok = false; break; }
+        if (context.isCancelled()) {
+            error = "操作已取消";
+            ok = false;
+            break;
+        }
         ssize_t count = write(fd, data.data() + written, data.size() - written);
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) { error = "写入归档失败: " + std::string(std::strerror(errno)); ok = false; break; }
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0) {
+            error = "写入归档失败: " + std::string(std::strerror(errno));
+            ok = false;
+            break;
+        }
         written += static_cast<size_t>(count);
     }
-    if (ok && fsync(fd) != 0) { error = "刷新归档失败: " + std::string(std::strerror(errno)); ok = false; }
-    if (close(fd) != 0 && ok) { error = "关闭归档失败: " + std::string(std::strerror(errno)); ok = false; }
-    if (ok && context.isCancelled()) { error = "操作已取消"; ok = false; }
+    if (ok && fsync(fd) != 0) {
+        error = "刷新归档失败: " + std::string(std::strerror(errno));
+        ok = false;
+    }
+    if (close(fd) != 0 && ok) {
+        error = "关闭归档失败: " + std::string(std::strerror(errno));
+        ok = false;
+    }
+    if (ok && context.isCancelled()) {
+        error = "操作已取消";
+        ok = false;
+    }
     if (ok) {
         const int result = context.noReplace
-            ? static_cast<int>(syscall(SYS_renameat2, AT_FDCWD, name.data(), AT_FDCWD, path.c_str(), 1u))
-            : rename(name.data(), path.c_str());
-        if (result != 0) { error = "提交归档失败: " + std::string(std::strerror(errno)); ok = false; }
+                               ? static_cast<int>(syscall(SYS_renameat2, AT_FDCWD, name.data(),
+                                                          AT_FDCWD, path.c_str(), 1u))
+                               : rename(name.data(), path.c_str());
+        if (result != 0) {
+            error = "提交归档失败: " + std::string(std::strerror(errno));
+            ok = false;
+        }
     }
-    if (!ok) unlink(name.data());
+    if (!ok)
+        unlink(name.data());
     return ok;
 }
 
-bool decodeFile(const std::string &path, const std::string &password, std::vector<Entry> &entries, std::string &error) {
-    std::vector<uint8_t> bytes;
-    return readArchive(path, bytes, error) && dbackup::archive_format::decodeCurrent(bytes, password, entries, error);
-}
+bool createPlainTar(const std::vector<dbackup::archive_scan::Entry>& scanned,
+                    const std::string& destination, const OperationContext& context,
+                    OperationContext& scanContext, size_t warningStart, std::string& error,
+                    PackFormat format = PackFormat::Tar) {
+    std::string pattern = destination + ".tmp.XXXXXX";
+    std::vector<char> name(pattern.begin(), pattern.end());
+    name.push_back('\0');
+    struct Temporary {
+        int fd;
+        const char* name;
+        bool committed = false;
+        bool created = false;
+        ~Temporary() {
+            if (fd >= 0) close(fd);
+            if (created && !committed) unlink(name);
+        }
+    } temporary{mkstemp(name.data()), name.data()};
+    if (temporary.fd < 0) {
+        error = "无法创建临时归档: " + std::string(std::strerror(errno));
+        return false;
+    }
+    temporary.created = true;
+    auto writeBytes = [&](const uint8_t* bytes, size_t size) {
+        size_t offset = 0;
+        while (offset < size) {
+            if (context.isCancelled()) {
+                error = "操作已取消";
+                return false;
+            }
+            ssize_t count = write(temporary.fd, bytes + offset, size - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                error = "写入 tar 归档失败: " + std::string(std::strerror(errno));
+                return false;
+            }
+            offset += static_cast<size_t>(count);
+        }
+        return true;
+    };
+    if (format == PackFormat::Custom) {
+        const uint8_t magic[] = {'D','B','C','S','0','0','0','1'};
+        if (!writeBytes(magic, sizeof(magic))) return false;
+    }
+    std::set<std::string> availableFiles;
+    size_t count = 0;
+    OperationProgress progress;
+    progress.stage = OperationStage::Reading;
+    progress.totalFiles = scanned.size();
+    for (const auto& item : scanned) {
+        if (context.isCancelled()) {
+            error = "操作已取消";
+            return false;
+        }
+        if (item.type == 3 && !availableFiles.count(item.linkTarget)) {
+            scanContext.warn(item.relativePath + ": 硬链接目标未能备份");
+            continue;
+        }
+        off_t start = lseek(temporary.fd, 0, SEEK_CUR);
+        if (start < 0) {
+            error = "无法定位临时归档";
+            return false;
+        }
+        Entry entry;
+        entry.file = item;
+        const uint64_t size = item.type == 0 ? item.metadata.size : 0;
+        std::vector<uint8_t> headers;
+        const bool headersOk = format == PackFormat::Tar
+            ? dbackup::archive_tar::encodeEntryHeaders(entry, size, count, headers, error)
+            : dbackup::archive_custom_stream::entryHeader(entry, size, headers, error);
+        if (!headersOk ||
+            !writeBytes(headers.data(), headers.size()))
+            return false;
+        std::vector<uint8_t> unused;
+        errno = 0;
+        if (item.type == 0 && !readSource(item, unused, context, error, temporary.fd)) {
+            if (errno == EACCES || errno == EPERM) {
+                if (ftruncate(temporary.fd, start) != 0 || lseek(temporary.fd, start, SEEK_SET) < 0) {
+                    error = "无法回退未读取的 tar 条目";
+                    return false;
+                }
+                scanContext.warn(error);
+                error.clear();
+                continue;
+            }
+            return false;
+        }
+        static const uint8_t zeros[1024]{};
+        const size_t padding = format == PackFormat::Tar
+            ? static_cast<size_t>((512 - size % 512) % 512) : 0;
+        if (!writeBytes(zeros, padding)) return false;
+        if (item.type == 0) availableFiles.insert(item.relativePath);
+        ++count;
+        progress.currentPath = item.relativePath;
+        progress.completedFiles = count;
+        context.report(progress);
+    }
+    if (!count && scanContext.warnings->size() > warningStart) {
+        error = "没有可备份的内容";
+        for (size_t i = warningStart; i < scanContext.warnings->size(); ++i)
+            error += "\n" + (*scanContext.warnings)[i];
+        return false;
+    }
+    static const uint8_t end[1024]{};
+    if (!writeBytes(end, format == PackFormat::Tar ? sizeof(end) : 8) ||
+        fsync(temporary.fd) != 0) {
+        if (error.empty()) error = "刷新归档失败: " + std::string(std::strerror(errno));
+        return false;
+    }
+    if (context.isCancelled()) {
+        error = "操作已取消";
+        return false;
+    }
+    int fd = temporary.fd;
+    temporary.fd = -1;
+    if (close(fd) != 0) {
+        error = "关闭归档失败: " + std::string(std::strerror(errno));
+        return false;
+    }
+    int result = context.noReplace
+        ? static_cast<int>(syscall(SYS_renameat2, AT_FDCWD, name.data(), AT_FDCWD,
+                                   destination.c_str(), 1u))
+        : rename(name.data(), destination.c_str());
+    if (result != 0) {
+        error = "提交归档失败: " + std::string(std::strerror(errno));
+        return false;
+    }
+    temporary.committed = true;
+    for (size_t i = warningStart; i < scanContext.warnings->size(); ++i) {
+        if (!error.empty()) error += "\n";
+        error += (*scanContext.warnings)[i];
+    }
+    progress.stage = OperationStage::Completed;
+    context.report(progress);
+    return true;
 }
 
-bool ArchiveService::create(const std::string &source, const std::string &destination, std::string &error) {
+bool createWrapped(const std::vector<dbackup::archive_scan::Entry>& scanned,
+                   const std::string& destination, const PackOptions& options,
+                   const OperationContext& context, OperationContext& scanContext,
+                   size_t warningStart, std::string& error) {
+    struct TemporaryPath {
+        std::vector<char> name;
+        int fd = -1;
+        bool created = false;
+        explicit TemporaryPath(const std::string& pattern) : name(pattern.begin(), pattern.end()) {
+            name.push_back('\0');
+            fd = mkstemp(name.data());
+            created = fd >= 0;
+        }
+        ~TemporaryPath() {
+            if (fd >= 0) close(fd);
+            if (created) unlink(name.data());
+        }
+    } packed(destination + ".packed.XXXXXX"), output(destination + ".tmp.XXXXXX");
+    if (packed.fd < 0 || output.fd < 0) {
+        error = "无法创建归档暂存文件: " + std::string(std::strerror(errno));
+        return false;
+    }
+    close(packed.fd);
+    packed.fd = -1;
+    OperationContext packing = context;
+    packing.onProgress = [&context](const OperationProgress& progress) {
+        if (progress.stage != OperationStage::Completed)
+            context.report(progress);
+    };
+    // The reserved staging path already exists; noReplace applies only to the
+    // caller's final archive, not to this private temporary file.
+    packing.noReplace = false;
+    if (!createPlainTar(scanned, packed.name.data(), packing, scanContext, warningStart, error,
+                        options.format))
+        return false;
+    packed.fd = open(packed.name.data(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (packed.fd < 0) {
+        error = "无法读取归档暂存文件: " + std::string(std::strerror(errno));
+        return false;
+    }
+    OperationProgress progress;
+    progress.stage = OperationStage::Compressing;
+    context.report(progress);
+    std::string warnings = error;
+    error.clear();
+    PackOptions effectiveOptions = options;
+    if (effectiveOptions.compression == Compression::Deflate && effectiveOptions.compressionLevel == 0)
+        effectiveOptions.compression = Compression::None;
+    if (!dbackup::archive_blocks::encode(packed.fd, output.fd, effectiveOptions, context, error))
+        return false;
+    if (fsync(output.fd) != 0) {
+        error = "刷新归档失败: " + std::string(std::strerror(errno));
+        return false;
+    }
+    if (context.isCancelled()) {
+        error = "操作已取消";
+        return false;
+    }
+    int fd = output.fd;
+    output.fd = -1;
+    if (close(fd) != 0) {
+        error = "关闭归档失败: " + std::string(std::strerror(errno));
+        return false;
+    }
+    const int result = context.noReplace
+        ? static_cast<int>(syscall(SYS_renameat2, AT_FDCWD, output.name.data(), AT_FDCWD,
+                                   destination.c_str(), 1u))
+        : rename(output.name.data(), destination.c_str());
+    if (result != 0) {
+        error = "提交归档失败: " + std::string(std::strerror(errno));
+        return false;
+    }
+    output.created = false;
+    error = std::move(warnings);
+    progress.stage = OperationStage::Completed;
+    context.report(progress);
+    return true;
+}
+
+// 读取当前归档文件并执行格式识别、解密和校验。
+bool decodeFile(const std::string& path, const std::string& password, std::vector<Entry>& entries,
+                std::string& error) {
+    std::vector<uint8_t> bytes;
+    return readArchive(path, bytes, error) &&
+           dbackup::archive_format::decodeCurrent(bytes, password, entries, error);
+}
+
+// Restore a seekable tar by referring to its file ranges instead of retaining
+// their contents in the decoded metadata list.
+bool restoreTar(int fd, const std::string& destination, const OperationContext& context,
+                std::string& error, PackFormat format = PackFormat::Tar) {
+    std::vector<Entry> entries;
+    std::vector<uint64_t> offsets;
+    const bool decoded = format == PackFormat::Tar
+        ? dbackup::archive_tar::decodeMetadata(fd, entries, offsets, error)
+        : dbackup::archive_custom_stream::decodeMetadata(fd, entries, offsets, error);
+    if (!decoded)
+        return false;
+    std::map<std::string, size_t> indices;
+    for (size_t i = 0; i < entries.size(); ++i)
+        indices.emplace(entries[i].file.relativePath, i);
+    const auto writer = [&](const Entry& entry, int output, const OperationContext& operation,
+                            std::string& detail) {
+        auto found = indices.find(entry.file.relativePath);
+        if (found == indices.end()) {
+            detail = "归档条目缺少数据位置";
+            errno = EIO;
+            return false;
+        }
+        uint64_t position = offsets[found->second], left = entry.file.metadata.size;
+        std::vector<uint8_t> buffer(4u * 1024u * 1024u);
+        while (left) {
+            if (operation.isCancelled()) {
+                detail = "操作已取消";
+                return false;
+            }
+            size_t requested = static_cast<size_t>(std::min<uint64_t>(left, buffer.size()));
+            ssize_t count;
+            do { count = pread(fd, buffer.data(), requested, static_cast<off_t>(position)); }
+            while (count < 0 && errno == EINTR);
+            if (count <= 0) {
+                detail = "读取 tar 文件数据失败: " + entry.file.relativePath;
+                errno = EIO;
+                return false;
+            }
+            size_t done = 0;
+            while (done < static_cast<size_t>(count)) {
+                ssize_t written = write(output, buffer.data() + done, size_t(count) - done);
+                if (written < 0 && errno == EINTR)
+                    continue;
+                if (written <= 0) {
+                    detail = "写入恢复文件失败: " + entry.file.relativePath + ": " +
+                             std::strerror(errno);
+                    return false;
+                }
+                done += static_cast<size_t>(written);
+            }
+            position += static_cast<size_t>(count);
+            left -= static_cast<size_t>(count);
+        }
+        return true;
+    };
+    return dbackup::archive_restore::restore(entries, destination, context, error, writer);
+}
+
+bool inspectPacked(const std::string& file, std::vector<ArchiveEntry>& output, std::string& error,
+                   const std::string& password, bool includeData) {
+    output.clear();
+    error.clear();
+    struct CloseFd {
+        int fd;
+        ~CloseFd() { if (fd >= 0) close(fd); }
+    } source{open(file.c_str(), O_RDONLY | O_CLOEXEC)};
+    if (source.fd < 0) {
+        error = "无法打开归档: " + file;
+        return false;
+    }
+    uint8_t magic[10]{};
+    ssize_t n;
+    do { n = pread(source.fd, magic, sizeof(magic), 0); } while (n < 0 && errno == EINTR);
+    if (n >= 8 && std::memcmp(magic, "DBPK0001", 8) == 0) {
+        error = "不支持旧版 DBackup 封装格式";
+        return false;
+    }
+    struct CloseStream {
+        FILE* stream = nullptr;
+        ~CloseStream() { if (stream) std::fclose(stream); }
+    } staging;
+    int packedFd = source.fd;
+    PackFormat format = PackFormat::Tar;
+    bool compressed = false;
+    const uint8_t currentMagic[] = {'D', 'B', 'P', 'K', 2, 0, 0, 0};
+    if (n >= 8 && (!std::memcmp(magic, currentMagic, 8) ||
+                   !std::memcmp(magic, "DBPK0002", 8))) {
+        staging.stream = std::tmpfile();
+        if (!staging.stream) {
+            error = "无法创建归档暂存文件: " + std::string(std::strerror(errno));
+            return false;
+        }
+        packedFd = fileno(staging.stream);
+        if (!dbackup::archive_blocks::decode(source.fd, packedFd, password, format, {}, error))
+            return false;
+        compressed = n >= 10 && magic[9] != uint8_t(Compression::None);
+    }
+    std::vector<Entry> decoded;
+    std::vector<uint64_t> offsets;
+    bool ok = format == PackFormat::Tar
+        ? dbackup::archive_tar::decodeMetadata(packedFd, decoded, offsets, error)
+        : dbackup::archive_custom_stream::decodeMetadata(packedFd, decoded, offsets, error);
+    if (!ok) return false;
+    constexpr uint64_t maxContent = 64u * 1024u * 1024u;
+    uint64_t total = 0;
+    for (const auto& item : decoded) {
+        if (!includeData || item.file.type != 0) continue;
+        if (item.file.metadata.size > maxContent - total) {
+            error = "归档文件内容超过 64 MiB 检查限制，请使用元数据检查";
+            return false;
+        }
+        total += item.file.metadata.size;
+    }
+    std::vector<ArchiveEntry> result;
+    for (size_t i = 0; i < decoded.size(); ++i) {
+        const auto& item = decoded[i];
+        ArchiveEntry entry{};
+        entry.type = item.file.type;
+        entry.flags = compressed && item.file.type == 0 ? 1 : 0;
+        entry.relativePath = item.file.relativePath;
+        entry.mode = item.file.metadata.mode;
+        entry.mtimeMs = item.file.metadata.mtimeNs / 1000000;
+        entry.uid = item.file.metadata.uid;
+        entry.gid = item.file.metadata.gid;
+        entry.deviceMajor = item.file.metadata.deviceMajor;
+        entry.deviceMinor = item.file.metadata.deviceMinor;
+        entry.owner = item.file.owner;
+        entry.linkTarget = item.file.linkTarget;
+        entry.originalSize = item.file.type == 0 ? item.file.metadata.size : 0;
+        if (includeData && entry.originalSize) {
+            entry.data.resize(static_cast<size_t>(entry.originalSize));
+            size_t done = 0;
+            while (done < entry.data.size()) {
+                ssize_t count = pread(packedFd, &entry.data[done], entry.data.size() - done,
+                                      static_cast<off_t>(offsets[i] + done));
+                if (count < 0 && errno == EINTR) continue;
+                if (count <= 0) {
+                    error = "读取归档内容失败: " + entry.relativePath;
+                    return false;
+                }
+                done += static_cast<size_t>(count);
+            }
+        }
+        result.push_back(std::move(entry));
+    }
+    output = std::move(result);
+    return true;
+}
+} // namespace
+
+bool ArchiveService::create(const std::string& source, const std::string& destination,
+                            std::string& error) {
     return create(source, destination, PackOptions{}, error);
 }
-bool ArchiveService::create(const std::string &source, const std::string &destination,
-                            const PackOptions &options, std::string &error) {
+bool ArchiveService::create(const std::string& source, const std::string& destination,
+                            const PackOptions& options, std::string& error) {
     return create(std::vector<std::string>{source}, destination, options, error, {});
 }
-bool ArchiveService::create(const std::vector<std::string> &sources, const std::string &destination,
-                            const PackOptions &options, std::string &error) {
+bool ArchiveService::create(const std::vector<std::string>& sources, const std::string& destination,
+                            const PackOptions& options, std::string& error) {
     return create(sources, destination, options, error, {});
 }
-bool ArchiveService::create(const std::vector<std::string> &sources, const std::string &destination,
-                            const PackOptions &options, std::string &error, const OperationContext &context) {
+bool ArchiveService::create(const std::vector<std::string>& sources, const std::string& destination,
+                            const PackOptions& options, std::string& error,
+                            const OperationContext& context) try {
     error.clear();
     std::vector<std::string> localWarnings;
     OperationContext scanContext = context;
-    if (!scanContext.warnings) scanContext.warnings = &localWarnings;
+    if (!scanContext.warnings)
+        scanContext.warnings = &localWarnings;
     const size_t warningStart = scanContext.warnings->size();
     std::vector<dbackup::archive_scan::Entry> scanned;
-    OperationProgress progress; progress.stage = OperationStage::Scanning; context.report(progress);
-    if (!dbackup::archive_scan::collect(sources, destination, options.filter, scanned, nullptr, scanContext, error, context.includeSourceDirectory)) return false;
-    std::vector<Entry> entries;
-    std::set<std::string> availableFiles;
-    progress.stage = OperationStage::Reading; progress.totalFiles = scanned.size();
-    for (auto &item : scanned) {
-        if (context.isCancelled()) { error = "操作已取消"; return false; }
-        Entry entry; entry.file = std::move(item);
-        errno = 0;
-        if (entry.file.type == 0 && !readSource(entry.file, entry.data, context, error)) {
-            if (errno == EACCES || errno == EPERM) { scanContext.warn(error); error.clear(); continue; }
-            return false;
-        }
-        if (entry.file.type == 3 && !availableFiles.count(entry.file.linkTarget)) {
-            scanContext.warn(entry.file.relativePath + ": 硬链接目标未能备份"); continue;
-        }
-        if (entry.file.type == 0) availableFiles.insert(entry.file.relativePath);
-        progress.currentPath = entry.file.relativePath; ++progress.completedFiles; context.report(progress);
-        entries.push_back(std::move(entry));
-    }
-    if (entries.empty() && scanContext.warnings->size() > warningStart) {
-        error = "没有可备份的内容";
-        for (size_t i = warningStart; i < scanContext.warnings->size(); ++i) error += "\n" + (*scanContext.warnings)[i];
+    OperationProgress progress;
+    progress.stage = OperationStage::Scanning;
+    context.report(progress);
+    if (!dbackup::archive_scan::collect(sources, destination, options.filter, scanned, nullptr,
+                                        scanContext, error, context.includeSourceDirectory))
         return false;
-    }
-    progress.stage = OperationStage::Compressing; context.report(progress);
-    std::vector<uint8_t> bytes;
-    if (!dbackup::archive_format::encodeCurrent(entries, options, bytes, error) ||
-        !writeArchive(destination, bytes, context, error)) return false;
-    for (size_t i = warningStart; i < scanContext.warnings->size(); ++i) { if (!error.empty()) error += "\n"; error += (*scanContext.warnings)[i]; }
-    progress.stage = OperationStage::Completed; context.report(progress); return true;
+    const bool plainTar = options.format == PackFormat::Tar && options.password.empty() &&
+                          (options.compression == Compression::None ||
+                           (options.compression == Compression::Deflate && options.compressionLevel == 0));
+    if (plainTar)
+        return createPlainTar(scanned, destination, context, scanContext, warningStart, error);
+    return createWrapped(scanned, destination, options, context, scanContext, warningStart, error);
+} catch (const std::bad_alloc&) {
+    error = "内存不足，无法完成备份";
+    return false;
 }
-bool ArchiveService::preview(const std::vector<std::string> &sources, const FilterOptions &filter,
-                             BackupPreview &preview, std::string &error, bool includeSingleDirectoryRoot) {
+bool ArchiveService::preview(const std::vector<std::string>& sources, const FilterOptions& filter,
+                             BackupPreview& preview, std::string& error,
+                             bool includeSingleDirectoryRoot) {
     std::vector<dbackup::archive_scan::Entry> scanned;
     std::vector<std::string> warnings;
-    OperationContext context; context.warnings = &warnings;
-    if (!dbackup::archive_scan::collect(sources, {}, filter, scanned, &preview, context, error, includeSingleDirectoryRoot)) return false;
-    for (const auto &warning : warnings) { if (!error.empty()) error += "\n"; error += warning; }
-    return true;
-}
-bool ArchiveService::inspect(const std::string &file, std::vector<ArchiveEntry> &entries, std::string &error) {
-    return inspect(file, entries, error, "");
-}
-bool ArchiveService::inspect(const std::string &file, std::vector<ArchiveEntry> &entries,
-                             std::string &error, const std::string &password) {
-    entries.clear();
-    std::vector<Entry> decoded;
-    if (!decodeFile(file, password, decoded, error)) return false;
-    for (const auto &item : decoded) {
-        ArchiveEntry entry{};
-        entry.type = item.file.type; entry.flags = item.compressed ? 1 : 0; entry.relativePath = item.file.relativePath;
-        entry.mode = item.file.metadata.mode; entry.mtimeMs = item.file.metadata.mtimeNs / 1000000;
-        entry.uid = item.file.metadata.uid; entry.gid = item.file.metadata.gid;
-        entry.deviceMajor = item.file.metadata.deviceMajor; entry.deviceMinor = item.file.metadata.deviceMinor;
-        entry.owner = item.file.owner; entry.linkTarget = item.file.linkTarget;
-        entry.originalSize = item.data.size(); entry.data.assign(item.data.begin(), item.data.end());
-        entries.push_back(std::move(entry));
+    OperationContext context;
+    context.warnings = &warnings;
+    if (!dbackup::archive_scan::collect(sources, {}, filter, scanned, &preview, context, error,
+                                        includeSingleDirectoryRoot))
+        return false;
+    for (const auto& warning : warnings) {
+        if (!error.empty())
+            error += "\n";
+        error += warning;
     }
     return true;
 }
-bool ArchiveService::extract(const std::string &file, const std::string &destination, std::string &error) {
+bool ArchiveService::inspect(const std::string& file, std::vector<ArchiveEntry>& entries,
+                             std::string& error) {
+    return inspect(file, entries, error, "");
+}
+bool ArchiveService::inspect(const std::string& file, std::vector<ArchiveEntry>& entries,
+                             std::string& error, const std::string& password) try {
+    return inspectPacked(file, entries, error, password, true);
+} catch (const std::bad_alloc&) {
+    entries.clear();
+    error = "内存不足，无法检查归档";
+    return false;
+}
+bool ArchiveService::inspectMetadata(const std::string& file, std::vector<ArchiveEntry>& entries,
+                                     std::string& error, const std::string& password) try {
+    return inspectPacked(file, entries, error, password, false);
+} catch (const std::bad_alloc&) {
+    entries.clear();
+    error = "内存不足，无法检查归档";
+    return false;
+}
+bool ArchiveService::extract(const std::string& file, const std::string& destination,
+                             std::string& error) {
     return extract(file, destination, error, "", {});
 }
-bool ArchiveService::extract(const std::string &file, const std::string &destination,
-                             std::string &error, const std::string &password) {
+bool ArchiveService::extract(const std::string& file, const std::string& destination,
+                             std::string& error, const std::string& password) {
     return extract(file, destination, error, password, {});
 }
-bool ArchiveService::extract(const std::string &file, const std::string &destination,
-                             std::string &error, const std::string &password, const OperationContext &context) {
-    std::vector<Entry> decoded;
-    return decodeFile(file, password, decoded, error) && dbackup::archive_restore::restore(decoded, destination, context, error);
+bool ArchiveService::extract(const std::string& file, const std::string& destination,
+                             std::string& error, const std::string& password,
+                             const OperationContext& context) try {
+    int fd = open(file.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        error = "无法打开归档: " + file;
+        return false;
+    }
+    struct CloseFile {
+        int fd;
+        ~CloseFile() { if (fd >= 0) close(fd); }
+    } closeFile{fd};
+    uint8_t magic[8]{};
+    ssize_t count;
+    do { count = pread(fd, magic, sizeof(magic), 0); } while (count < 0 && errno == EINTR);
+    const bool wrapped = count == 8 && std::memcmp(magic, "DBPK0001", 8) == 0;
+    const uint8_t currentMagic[] = {'D', 'B', 'P', 'K', 2, 0, 0, 0};
+    const bool chunked = count == 8 && (!std::memcmp(magic, currentMagic, 8) ||
+                                        !std::memcmp(magic, "DBPK0002", 8));
+    if (wrapped) {
+        error = "不支持旧版 DBackup 封装格式";
+        return false;
+    }
+    if (chunked) {
+        struct CloseStream {
+            FILE* stream;
+            ~CloseStream() { if (stream) std::fclose(stream); }
+        } temporary{std::tmpfile()};
+        if (!temporary.stream) {
+            error = "无法创建归档暂存文件: " + std::string(std::strerror(errno));
+            return false;
+        }
+        const int packedFd = fileno(temporary.stream);
+        PackFormat format;
+        if (!dbackup::archive_blocks::decode(fd, packedFd, password, format, context, error))
+            return false;
+        return restoreTar(packedFd, destination, context, error, format);
+    }
+    return restoreTar(fd, destination, context, error);
+} catch (const std::bad_alloc&) {
+    error = "内存不足，无法恢复归档";
+    return false;
 }
-

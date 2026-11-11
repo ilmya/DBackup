@@ -53,11 +53,6 @@ def compact_standard(root: Path) -> None:
         tool.write_pattern(target, size, "increment", seed)
         tool.set_mtime(target, days)
 
-    network = root / "fixtures" / "network"
-    tool.write_pattern(network / "alice/multi-block.bin", 8 * 1024 * 1024, "random", 501)
-    shutil.copyfile(network / "alice/multi-block.bin", network / "alice/duplicate.bin")
-    tool.write_pattern(network / "bob/private.bin", 1024 * 1024, "random", 502)
-
     tool.save_json(root / "manifests/incremental-v1.json",
                    tool.build_manifest(root / "fixtures/incremental"))
     tool.save_json(root / "manifests/generated-fixtures.json", tool.build_manifest(root / "fixtures"))
@@ -86,7 +81,7 @@ def main() -> int:
     if args.profile == "standard":
         compact_standard(root)
     print(f"Compact acceptance corpus ready: {root}")
-    print("Standard profile: deterministic boundary, compression, filter, incremental, and remote fixtures.")
+    print("Standard profile: deterministic boundary, compression, filter, and incremental fixtures.")
     return tool.EXIT_OK
 
 

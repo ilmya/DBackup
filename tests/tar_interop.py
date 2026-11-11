@@ -19,10 +19,13 @@ def main():
     parser.add_argument("--root", required=True)
     parser.add_argument("--cli", required=True)
     args = parser.parse_args()
-    root = Path(args.root).resolve()
-    tool.load_marker(root)
-    with tempfile.TemporaryDirectory(prefix="tar-interop-", dir=root) as directory:
+    fixture_root = Path(args.root).resolve()
+    tool.load_marker(fixture_root)
+    with tempfile.TemporaryDirectory(prefix="dbackup-tar-interop-",
+                                     dir=os.environ.get("TMPDIR") or None) as directory:
         base = Path(directory)
+        tool.write_marker(base)
+        root = base
         source = base / "source"
         source.mkdir()
         nested = source / ("long-" + "a" * 110)

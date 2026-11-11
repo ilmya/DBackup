@@ -403,7 +403,8 @@ def git_commit() -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
-def write_report(path: Path, title: str, command: str, results: list[dict], evidence: list[str]) -> None:
+def write_report(path: Path, title: str, command: str, results: list[dict], evidence: list[str],
+                 conclusion: str | None = None) -> None:
     counts = {status: sum(1 for item in results if item["status"] == status)
               for status in ("PASS", "FAIL", "SKIP", "BLOCKED", "MANUAL", "WARN")}
     lines = [f"# {title}", "", f"- 生成时间：`{now_iso()}`", f"- 主机：`{socket.gethostname()}`",
@@ -416,7 +417,8 @@ def write_report(path: Path, title: str, command: str, results: list[dict], evid
         lines.append("| {status} | {category} | `{path}` | {detail} |".format(
             **{key: markdown_escape(value) for key, value in item.items()}))
     lines.extend(["", "## 证据", ""] + [f"- `{value}`" for value in evidence])
-    lines.extend(["", "## 结论", "", "**FAIL**" if counts["FAIL"] else "**PASS（不含 SKIP/BLOCKED/MANUAL 项）**", ""])
+    default_conclusion = "FAIL" if counts["FAIL"] else "PASS（不含 SKIP/BLOCKED/MANUAL 项）"
+    lines.extend(["", "## 结论", "", f"**{conclusion or default_conclusion}**", ""])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
 

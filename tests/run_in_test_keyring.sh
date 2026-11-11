@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-test_home="$(mktemp -d "${TMPDIR:-/tmp}/dbackup-keyring-test-XXXXXX")"
+runtime_root="${DBACKUP_TEST_RUNTIME_ROOT:-/tmp}"
+test_home="$(mktemp -d "${runtime_root%/}/dbackup-keyring-test-XXXXXX")"
 cleanup() { rm -rf -- "$test_home"; }
 trap cleanup EXIT
 export HOME="$test_home"

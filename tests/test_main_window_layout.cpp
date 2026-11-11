@@ -1,16 +1,16 @@
 #include "gui/main_window.h"
 #include "gui/theme.h"
 #include <QApplication>
+#include <QDockWidget>
+#include <QMenu>
+#include <QMenuBar>
+#include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QStackedWidget>
-#include <QMenuBar>
-#include <QMenu>
-#include <QTabBar>
-#include <QPlainTextEdit>
-#include <QDockWidget>
-#include <QTreeView>
 #include <QSplitter>
+#include <QStackedWidget>
+#include <QTabBar>
+#include <QTreeView>
 #include <gtest/gtest.h>
 
 TEST(MainWindowLayout, StartsOnBackupAndFitsMinimumSize) {
@@ -19,28 +19,32 @@ TEST(MainWindowLayout, StartsOnBackupAndFitsMinimumSize) {
     window.resize(860, 600);
     window.show();
     QApplication::processEvents();
-    auto *pages = window.findChild<QStackedWidget *>();
-    auto *log = window.findChild<QPlainTextEdit *>("activityLog");
-    auto *dock = window.findChild<QDockWidget *>("activityLogDock");
-    ASSERT_NE(log, nullptr); ASSERT_NE(dock, nullptr);
+    auto* pages = window.findChild<QStackedWidget*>();
+    auto* log = window.findChild<QPlainTextEdit*>("activityLog");
+    auto* dock = window.findChild<QDockWidget*>("activityLogDock");
+    ASSERT_NE(log, nullptr);
+    ASSERT_NE(dock, nullptr);
     EXPECT_GE(log->height(), 100);
     EXPECT_GT(log->maximumHeight(), log->minimumHeight());
     ASSERT_NE(pages, nullptr);
     ASSERT_EQ(pages->count(), 5);
     EXPECT_EQ(pages->currentIndex(), 0);
-    auto *backup = qobject_cast<QScrollArea *>(pages->widget(0));
+    auto* backup = qobject_cast<QScrollArea*>(pages->widget(0));
     ASSERT_NE(backup, nullptr);
-    auto *output = window.findChild<QWidget *>("backupOutputPanel");
-    auto *filter = window.findChild<QWidget *>("backupFilterPanel");
-    auto *tree = window.findChild<QTreeView *>("backupSourceTree");
-    auto *splitter = window.findChild<QSplitter *>("backupColumns");
-    ASSERT_NE(tree, nullptr); ASSERT_NE(splitter, nullptr);
+    auto* output = window.findChild<QWidget*>("backupOutputPanel");
+    auto* filter = window.findChild<QWidget*>("backupFilterPanel");
+    auto* tree = window.findChild<QTreeView*>("backupSourceTree");
+    auto* splitter = window.findChild<QSplitter*>("backupColumns");
+    ASSERT_NE(tree, nullptr);
+    ASSERT_NE(splitter, nullptr);
     EXPECT_FALSE(tree->isHeaderHidden());
-    EXPECT_FALSE(tree->isColumnHidden(1)); EXPECT_FALSE(tree->isColumnHidden(3));
+    EXPECT_FALSE(tree->isColumnHidden(1));
+    EXPECT_FALSE(tree->isColumnHidden(3));
     EXPECT_TRUE(tree->isColumnHidden(2));
     EXPECT_EQ(splitter->orientation(), Qt::Horizontal);
-    EXPECT_NE(window.findChild<QWidget *>("selectedSourceInfo"), nullptr);
-    ASSERT_NE(output, nullptr); ASSERT_NE(filter, nullptr);
+    EXPECT_NE(window.findChild<QWidget*>("selectedSourceInfo"), nullptr);
+    ASSERT_NE(output, nullptr);
+    ASSERT_NE(filter, nullptr);
     EXPECT_TRUE(output->isAncestorOf(filter));
     EXPECT_LE(filter->mapTo(output, QPoint(0, filter->height())).y(), output->height());
     EXPECT_EQ(backup->horizontalScrollBar()->maximum(), 0);
@@ -48,16 +52,18 @@ TEST(MainWindowLayout, StartsOnBackupAndFitsMinimumSize) {
     for (int index = 1; index < pages->count(); ++index) {
         pages->setCurrentIndex(index);
         QApplication::processEvents();
-        auto *page = qobject_cast<QScrollArea *>(pages->widget(index));
+        auto* page = qobject_cast<QScrollArea*>(pages->widget(index));
         ASSERT_NE(page, nullptr);
         EXPECT_EQ(page->horizontalScrollBar()->maximum(), 0) << index;
         EXPECT_EQ(page->verticalScrollBar()->maximum(), 0) << index;
     }
-    auto *tabs = window.findChild<QTabBar *>("mainNavigation");
-    ASSERT_NE(tabs, nullptr); EXPECT_EQ(tabs->count(), 4);
+    auto* tabs = window.findChild<QTabBar*>("mainNavigation");
+    ASSERT_NE(tabs, nullptr);
+    EXPECT_EQ(tabs->count(), 4);
     ASSERT_FALSE(window.menuBar()->actions().empty());
-    auto *settings = window.menuBar()->actions().first()->menu();
-    ASSERT_NE(settings, nullptr); ASSERT_FALSE(settings->actions().empty());
+    auto* settings = window.menuBar()->actions().first()->menu();
+    ASSERT_NE(settings, nullptr);
+    ASSERT_FALSE(settings->actions().empty());
     tabs->setCurrentIndex(1);
     EXPECT_EQ(pages->currentIndex(), 1);
     settings->actions().first()->trigger();
@@ -66,7 +72,7 @@ TEST(MainWindowLayout, StartsOnBackupAndFitsMinimumSize) {
     EXPECT_EQ(pages->currentIndex(), 1);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setStyle("Fusion");
     app.setStyleSheet(DBackupTheme::styleSheet());
