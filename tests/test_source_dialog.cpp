@@ -1,10 +1,10 @@
 #include "gui/backup_options.h"
 #include "gui/filter_dialog.h"
 #include "gui/plan_result.h"
-#include "gui/restore_options.h"
 #include "gui/source_tree.h"
 #include "gui/theme.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -16,8 +16,6 @@
 #include <memory>
 
 TEST(RestoreOptions, DeviceRestorationIsEnabledByDefault) {
-    std::unique_ptr<QCheckBox> option(createDeviceRestoreOption());
-    EXPECT_TRUE(option->isChecked());
     EXPECT_TRUE(OperationContext{}.allowDeviceNodes);
 }
 

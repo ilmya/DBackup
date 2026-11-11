@@ -65,5 +65,10 @@ bool restore(const std::vector<archive_format::Entry>& entries,
 bool restore(const std::vector<archive_format::Entry>& entries,
              const std::filesystem::path& destination, const OperationContext& context,
              std::string& error, const ContentWriter& contentWriter);
+// Restore relative to an already opened directory descriptor without resolving
+// a pathname again. The descriptor remains owned by the caller.
+bool restoreAt(const std::vector<archive_format::Entry>& entries, int destinationFd,
+               const OperationContext& context, std::string& error,
+               const ContentWriter& contentWriter);
 
 } // namespace dbackup::archive_restore

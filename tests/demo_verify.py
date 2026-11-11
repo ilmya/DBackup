@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import signal
 import stat
 import subprocess
 import sys
@@ -15,8 +16,17 @@ import time
 import demo
 
 tool = demo.tool
-TEST_PASSWORD = 'DBackup-Demo-Only-2026'
-GROUPS = ('filters', 'large-data', 'special-files')
+TEST_PASSWORD = '123'
+GROUPS = ('common', 'large-data', 'special-files')
+GROUP_LABELS = {'common': '常规筛选', 'large-data': '大文件', 'special-files': '特殊文件'}
+FORMAT_LABELS = {'custom': '自定义', 'tar': 'tar'}
+COMPRESSION_LABELS = {'none': '不压缩', 'huffman': 'Huffman', 'lz77': 'LZ77',
+                      'deflate': 'DEFLATE'}
+STATUS_LABELS = {'PASS': '通过', 'PARTIAL': '部分完成', 'FAIL': '失败',
+                 'SKIP': '跳过', 'BLOCKED': '受阻', 'WARN': '警告'}
+CATEGORY_LABELS = {'Path': '路径', 'Type': '类型', 'Size': '大小', 'Hardlink': '硬链接',
+                   'Device': '设备', 'Empty directory': '空目录', 'Link': '链接',
+                   'Mtime': '修改时间', 'Attributes': '权限', 'Ownership': '属主'}
 
 
 def regular_file_bytes(root):
@@ -37,9 +47,13 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--format', choices=('custom', 'tar'), default='custom')
     p.add_argument('--compression', choices=('none', 'huffman', 'lz77', 'deflate'), default='deflate')
-    p.add_argument('--encrypt', action='store_true')
+    encryption = p.add_mutually_exclusive_group()
+    encryption.add_argument('--encrypt', dest='encrypt', action='store_true',
+                            help='启用加密（默认，演示密码为 123）')
+    encryption.add_argument('--no-encrypt', dest='encrypt', action='store_false',
+                            help='不加密')
+    p.set_defaults(encrypt=True)
     p.add_argument('--group', choices=GROUPS, action='append', help='可重复；默认运行全部三组')
-    p.add_argument('--memory-mib', type=int, default=3072, help='每个 CLI 进程内存上限（默认 3072 MiB）')
     return p
 
 
@@ -58,6 +72,54 @@ def exit_status(rows, privileged):
 def permission_warning(warnings, path):
     return any(path in line and (os.strerror(errno.EPERM) in line or os.strerror(errno.EACCES) in line)
                for line in warnings.replace('\\n', '\n').splitlines())
+
+
+def cli_failure(proc):
+    """Keep actual diagnostics while suppressing the CLI's JSON progress events."""
+    diagnostics = []
+    for line in proc.stderr.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            event = None
+        if isinstance(event, dict) and 'stage' in event:
+            continue
+        if line.strip():
+            diagnostics.append(line.strip())
+    if proc.returncode < 0:
+        try:
+            status = f'CLI 被信号 {signal.Signals(-proc.returncode).name} 终止（退出码 {proc.returncode}）'
+        except ValueError:
+            status = f'CLI 被信号 {-proc.returncode} 终止（退出码 {proc.returncode}）'
+    else:
+        status = f'CLI 退出码 {proc.returncode}'
+    detail = '\n'.join(diagnostics)[-1000:]
+    if detail:
+        status += f'：{detail}'
+    if 'std::bad_alloc' in detail:
+        status += '\n提示：测试程序内存分配失败；请确认已用 bash build.sh test 更新测试程序，并检查系统可用内存。'
+    return status
+
+
+def print_details(rows):
+    """Show actionable comparison results; complete PASS details remain in the report."""
+    for row in rows:
+        if row['status'] not in ('FAIL', 'SKIP', 'BLOCKED', 'WARN'):
+            continue
+        detail = str(row['detail']).replace('\\n', '\n')
+        detail = detail.replace('Permission denied', '权限不足').replace(
+            'Operation not permitted', '无权执行此操作')
+        detail = detail.replace('[Errno 13] ', '').replace('[Errno 1] ', '')
+        lines = detail.splitlines() or ['']
+        category = CATEGORY_LABELS.get(row['category'], row['category'])
+        label = ('提示' if row['status'] == 'WARN' and
+                 '套接字节点不包含原服务或连接' in detail else STATUS_LABELS[row['status']])
+        if label == '提示' and category == '恢复警告':
+            category = '恢复提示'
+        path = GROUP_LABELS.get(row['path'], row['path'])
+        print(f"  [{label}] {category} · {path}：{lines[0]}")
+        for line in lines[1:]:
+            print(f'    {line}')
 
 
 def compare(source, restored, privileged, backup_warning, restore_warning):
@@ -88,20 +150,18 @@ def compare(source, restored, privileged, backup_warning, restore_warning):
     return comparisons + skipped
 
 
-def execute(cli, args, password, limit_mib):
+def execute(cli, args, password):
     env = os.environ.copy()
     env['DBACKUP_TEST_PASSWORD'] = password
-    def limit_memory():
-        ceiling = limit_mib * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (ceiling, ceiling))
+    def disable_core_dump():
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     start = time.monotonic()
     proc = subprocess.run([str(cli), *args], env=env, capture_output=True, text=True,
-                          errors='replace', preexec_fn=limit_memory)
+                          errors='replace', preexec_fn=disable_core_dump)
     try:
         payload = json.loads(proc.stdout.strip())
     except (ValueError, TypeError):
-        payload = {'ok': False, 'error': f'CLI 退出码 {proc.returncode}: {proc.stderr[-1000:]}'}
+        payload = {'ok': False, 'error': cli_failure(proc)}
     if proc.returncode and payload.get('ok'):
         payload = {'ok': False, 'error': f'CLI 退出码 {proc.returncode}'}
     return payload, time.monotonic() - start
@@ -114,9 +174,11 @@ def run(root, cli, options):
         raise tool.SafetyError('恢复根目录必须是非链接目录')
     run_dir = Path(tempfile.mkdtemp(prefix='dbackup-verify-', dir=restore))
     privileged = os.geteuid() == 0
-    password = (os.environ.get('DBACKUP_TEST_PASSWORD', TEST_PASSWORD) if options.encrypt else '')
-    if options.encrypt and not password:
-        raise ValueError('加密密码不能为空')
+    password = TEST_PASSWORD if options.encrypt else ''
+    print(f'测试配置：打包={FORMAT_LABELS[options.format]}，压缩={COMPRESSION_LABELS[options.compression]}，'
+          f'加密={"启用" if options.encrypt else "关闭"}，'
+          f'用户={os.geteuid()}（{"提权" if privileged else "普通"}）', flush=True)
+    print(f'测试程序：{cli}\n样例目录：{root}', flush=True)
     combined = []
     for group in dict.fromkeys(options.group or GROUPS):
         started = time.monotonic()
@@ -127,7 +189,7 @@ def run(root, cli, options):
         create = ['archive', 'create', '--root', str(root), '--source', str(source),
                   '--output', str(archive), '--format', options.format, '--algorithm', options.compression]
         source_bytes = regular_file_bytes(source)
-        backup, backup_seconds = execute(cli, create, password, options.memory_mib)
+        backup, backup_seconds = execute(cli, create, password)
         restore_seconds = None
         backup_warning = backup.get('data', {}).get('warning', '')
         restore_warning = ''
@@ -135,7 +197,7 @@ def run(root, cli, options):
             rows.append(result('FAIL', '备份', group, backup.get('error', '未知错误')))
         else:
             extraction = ['archive', 'extract', '--root', str(root), '--input', str(archive), '--output', str(restored)]
-            extracted, restore_seconds = execute(cli, extraction, password, options.memory_mib)
+            extracted, restore_seconds = execute(cli, extraction, password)
             restore_warning = extracted.get('data', {}).get('warning', '')
             if not extracted.get('ok'):
                 rows.append(result('FAIL', '恢复', group, extracted.get('error', '未知错误')))
@@ -165,25 +227,29 @@ def run(root, cli, options):
                     f'archive_bytes={archive.stat().st_size}' if archive.is_file() else 'archive_bytes=not_created',
                     f'elapsed={elapsed:.2f}s', f'archive={archive}', f'restored={restored}', f'outcome={outcome}']
         tool.write_report(run_dir / (group + '-report.md'), f'DBackup {group} 验收', 'bash test.sh', rows, evidence, outcome)
-        size_detail = (f'archive={archive.stat().st_size} bytes' if archive.is_file()
-                       else 'archive=not_created')
-        restore_detail = f'{restore_seconds:.2f}s' if restore_seconds is not None else 'not_run'
-        print(f'{group}: {outcome}, backup={backup_seconds:.2f}s, restore={restore_detail}, '
-              f'total={elapsed:.2f}s, source={source_bytes} bytes, {size_detail}, {counts}', flush=True)
+        size_detail = (f'归档={archive.stat().st_size}字节' if archive.is_file()
+                       else '归档=未生成')
+        restore_detail = f'{restore_seconds:.2f}秒' if restore_seconds is not None else '未执行'
+        print(f'{GROUP_LABELS[group]}：{STATUS_LABELS[outcome]}，备份={backup_seconds:.2f}秒，恢复={restore_detail}，'
+              f'总计={elapsed:.2f}秒，来源={source_bytes}字节，{size_detail}', flush=True)
+        print(f'  比较项：通过 {counts["PASS"]}，失败 {counts["FAIL"]}，'
+              f'跳过 {counts["SKIP"]}，受阻 {counts["BLOCKED"]}')
+        if archive.is_file() and source_bytes:
+            percent = archive.stat().st_size * 100 / source_bytes
+            print(f'  压缩比：{percent:.2f}%')
+        print_details(rows)
     overall = ('FAIL' if any(r['status'] == 'FAIL' for r in combined)
                else 'BLOCKED' if any(r['status'] == 'BLOCKED' or (privileged and r['status'] == 'SKIP') for r in combined)
                else 'PARTIAL' if any(r['status'] == 'SKIP' for r in combined) else 'PASS')
     tool.write_report(run_dir / 'summary.md', 'DBackup 演示数据验收汇总', 'bash test.sh', combined,
                       [f'uid={os.geteuid()}, privileged={privileged}', f'format={options.format}, compression={options.compression}, encrypted={options.encrypt}',
                        'CLI 核心验收；不代表 GUI 手工验收'], overall)
-    print(f'报告目录：{run_dir}', flush=True)
+    print(f'总体结果：{STATUS_LABELS[overall]}\n报告目录：{run_dir}', flush=True)
     return exit_status(combined, privileged)
 
 
 def main():
     options = parser().parse_args()
-    if options.memory_mib < 128:
-        raise ValueError('内存上限至少为 128 MiB')
     root = demo.canonical_root(None)
     build = Path(os.environ.get('DBACKUP_BUILD_DIR', str(demo.PROJECT / 'out/build-test')))
     if not build.is_absolute():

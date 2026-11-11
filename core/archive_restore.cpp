@@ -267,6 +267,11 @@ bool writeFile(int parent, const std::string& name, const archive_format::Entry&
 }
 } // namespace
 
+static bool restoreImpl(const std::vector<archive_format::Entry>& entries,
+                        const fs::path& destination, int destinationFd,
+                        const OperationContext& context, std::string& error,
+                        const ContentWriter& contentWriter);
+
 // 安全恢复条目，阻断路径逃逸并逐项报告权限、设备和元数据限制。
 bool restore(const std::vector<archive_format::Entry>& entries, const fs::path& destination,
              const OperationContext& context, std::string& error) {
@@ -276,6 +281,23 @@ bool restore(const std::vector<archive_format::Entry>& entries, const fs::path& 
 bool restore(const std::vector<archive_format::Entry>& entries, const fs::path& destination,
              const OperationContext& context, std::string& error,
              const ContentWriter& contentWriter) {
+    return restoreImpl(entries, destination, -1, context, error, contentWriter);
+}
+
+bool restoreAt(const std::vector<archive_format::Entry>& entries, int destinationFd,
+               const OperationContext& context, std::string& error,
+               const ContentWriter& contentWriter) {
+    if (destinationFd < 0) {
+        error = "无效的恢复目录";
+        return false;
+    }
+    return restoreImpl(entries, {}, destinationFd, context, error, contentWriter);
+}
+
+static bool restoreImpl(const std::vector<archive_format::Entry>& entries,
+                        const fs::path& destination, int destinationFd,
+                        const OperationContext& context, std::string& error,
+                        const ContentWriter& contentWriter) {
     error.clear();
     std::set<std::string> paths, regularFiles;
     for (const auto& entry : entries) {
@@ -306,7 +328,8 @@ bool restore(const std::vector<archive_format::Entry>& entries, const fs::path& 
         error = "操作已取消";
         return false;
     }
-    FileDescriptor root(linux_file::openDirectory(destination, true, error));
+    FileDescriptor root(destinationFd >= 0 ? dup(destinationFd)
+                                          : linux_file::openDirectory(destination, true, error));
     if (root.get() < 0)
         return false;
     uint64_t completed = 0;
@@ -421,7 +444,7 @@ bool restore(const std::vector<archive_format::Entry>& entries, const fs::path& 
                     ok = fail(file.relativePath, detail);
                 if (ok)
                     verifyMetadata(actual, file.metadata, file.relativePath, false, detail);
-                if (ok && file.type == 7) {
+                if (ok && file.type == 7 && !context.suppressSocketNotice) {
                     if (!detail.empty())
                         detail += "\\n";
                     detail +=

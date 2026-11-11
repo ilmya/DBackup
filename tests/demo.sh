@@ -10,7 +10,7 @@ case "$command_name" in
   help|-h|--help)
     cat <<'EOF'
 用法:
-  bash tests/demo.sh compare <filters|large-data|special-files> <恢复目录>
+  bash tests/demo.sh compare <common|large-data|special-files> <恢复目录>
 
 compare 报告写入 DBACKUP_BUILD_DIR/demo-reports。
 EOF

@@ -30,8 +30,12 @@ bool validId(const QString& id) {
 
 // 校验计划必填项、运行模式、cron、筛选器和算法枚举。
 bool validate(const BackupJob& job, QString& error) {
-    if (!job.repository && job.realtime) {
-        error = QObject::tr("独立归档不支持实时备份");
+    if (job.tarIncremental && job.repository) {
+        error = QObject::tr("增量归档不能同时使用版本仓库");
+        return false;
+    }
+    if (!job.repository && !job.tarIncremental && job.realtime) {
+        error = QObject::tr("实时备份需要增量仓库或增量归档模式");
         return false;
     }
     if (job.repository && !job.encrypted) {
@@ -547,6 +551,7 @@ bool JobManager::save(QString* saveError) {
                 QJsonObject{{"include", r.include}, {"path", QString::fromUtf8(r.path.c_str())}});
         filter["sourceRules"] = selected;
         QJsonObject o{{"repository", j.repository},
+                      {"tarIncremental", j.tarIncremental},
                       {"encrypted", j.encrypted},
                       {"format", static_cast<int>(j.format)},
                       {"compression", static_cast<int>(j.compression)},
@@ -634,6 +639,7 @@ void JobManager::load() {
 
         BackupJob job;
         job.repository = object.value("repository").toBool(true);
+        job.tarIncremental = object.value("tarIncremental").toBool(false);
         job.encrypted = object.value("encrypted").toBool(true);
         job.format = static_cast<PackFormat>(object.value("format").toInt(0));
         job.compression = static_cast<Compression>(object.value("compression").toInt(3));

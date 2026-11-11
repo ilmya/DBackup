@@ -39,7 +39,8 @@ BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) 
     format_ = new QButtonGroup(this);
     compression_ = new QButtonGroup(this);
     auto* modeLabel = new QLabel(tr("备份模式"));
-    auto* modeChoices = choices(mode_, {{tr("完整归档"), 0}, {tr("增量仓库"), 1}}, 0, "backupMode");
+    auto* modeChoices = choices(mode_, {{tr("完整归档"), 0}, {tr("增量仓库"), 1},
+                                        {tr("增量归档"), 2}}, 0, "backupMode");
     modeLabel->setVisible(allowRepository);
     modeChoices->setVisible(allowRepository);
     grid->addWidget(modeLabel, 0, 0);
@@ -69,12 +70,9 @@ BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) 
     showPassword_ = new QCheckBox(tr("显示"));
     grid->addWidget(showPassword_, 3, 3);
     repositoryHint_ = new QLabel(tr("增量仓库使用分块与 AES 加密"));
+    repositoryHint_->setObjectName("repositoryHint");
     repositoryHint_->setProperty("muted", true);
     grid->addWidget(repositoryHint_, 4, 1, 1, 3);
-    outputHint_ = new QLabel;
-    outputHint_->setProperty("muted", true);
-    outputHint_->setWordWrap(true);
-    grid->addWidget(outputHint_, 5, 1, 1, 3);
     connect(mode_, &QButtonGroup::idToggled, this, [this](int, bool) { updateEnabled(); });
     connect(format_, &QButtonGroup::idToggled, this, [this](int, bool) { updateEnabled(); });
     connect(compress_, &QCheckBox::toggled, this, [this] { updateEnabled(); });
@@ -88,13 +86,30 @@ BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) 
 bool BackupOptionsWidget::incremental() const {
     return mode_->checkedId() == 1;
 }
+bool BackupOptionsWidget::tarIncremental() const {
+    return mode_->checkedId() == 2;
+}
 bool BackupOptionsWidget::encryptionEnabled() const {
     return incremental() || encrypt_->isChecked();
 }
 
+void BackupOptionsWidget::setRepositoryRequired(bool required) {
+    if (required == repositoryRequired_ || !allowRepository_)
+        return;
+    if (required) {
+        previousMode_ = mode_->checkedId();
+        if (previousMode_ == 0)
+            mode_->button(1)->setChecked(true);
+    }
+    mode_->button(0)->setEnabled(!required);
+    repositoryRequired_ = required;
+    if (!required)
+        mode_->button(previousMode_)->setChecked(true);
+}
+
 void BackupOptionsWidget::setOptions(bool repository, bool encrypted, PackFormat format,
-                                     Compression compression) {
-    if (auto* b = mode_->button(repository && allowRepository_ ? 1 : 0))
+                                     Compression compression, bool tarIncremental) {
+    if (auto* b = mode_->button(allowRepository_ ? (tarIncremental ? 2 : (repository ? 1 : 0)) : 0))
         b->setChecked(true);
     if (auto* b = format_->button(static_cast<int>(format)))
         b->setChecked(true);
@@ -116,24 +131,19 @@ PackOptions BackupOptionsWidget::options() const {
     return result;
 }
 
+void BackupOptionsWidget::setPassword(const QString& password) {
+    password_->setText(password);
+}
+
 void BackupOptionsWidget::updateEnabled() {
-    const bool full = !incremental();
-    formatChoices_->setEnabled(full);
-    compress_->setEnabled(full);
-    compressionChoices_->setEnabled(full && compress_->isChecked());
-    encrypt_->setEnabled(full);
-    encrypt_->setVisible(full);
-    repositoryEncryption_->setVisible(!full);
+    const bool repository = incremental();
+    formatChoices_->setEnabled(!repository);
+    compress_->setEnabled(!repository);
+    compressionChoices_->setEnabled(!repository && compress_->isChecked());
+    encrypt_->setEnabled(!repository);
+    encrypt_->setVisible(!repository);
+    repositoryEncryption_->setVisible(repository);
     password_->setEnabled(encryptionEnabled());
     showPassword_->setEnabled(encryptionEnabled());
-    repositoryHint_->setVisible(!full);
-    if (!full)
-        outputHint_->setText(tr("输出：版本仓库，使用 DBackup 恢复"));
-    else if (format_->checkedId() == static_cast<int>(PackFormat::Tar) && !compress_->isChecked() &&
-             !encrypt_->isChecked())
-        outputHint_->setText(tr("输出：标准 tar，可使用系统工具打开"));
-    else if (format_->checkedId() == static_cast<int>(PackFormat::Tar))
-        outputHint_->setText(tr("tar 打包 + 压缩或加密：输出 .abk，使用 DBackup 恢复"));
-    else
-        outputHint_->setText(tr("输出：DBackup 归档（.abk），使用 DBackup 恢复"));
+    repositoryHint_->setVisible(repository);
 }

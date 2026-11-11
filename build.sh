@@ -9,14 +9,14 @@ command_name="${1:-run}"
 
 usage() {
   cat <<'EOF'
-用法: bash build.sh [run|build|test|coverage|install|help]
+用法: bash build.sh [run|root|build|test|coverage|help]
   run         配置、增量构建并启动图形界面（默认）
+  root        以当前用户构建，然后以 root 启动图形界面
   build       仅构建
   test        构建并运行全部单元、集成和支持工具测试
   coverage    在独立 GCC 构建目录运行单元测试并生成 gcov 摘要
-  install     构建并安装（默认安装至 ~/.local）
   help        显示此帮助
-环境变量: QT_ROOT、DBACKUP_BUILD_DIR、DBACKUP_COVERAGE_BUILD_DIR、DBACKUP_INSTALL_PREFIX、DBACKUP_JOBS
+环境变量: QT_ROOT、DBACKUP_BUILD_DIR、DBACKUP_COVERAGE_BUILD_DIR、DBACKUP_JOBS
 测试隔离目录: DBACKUP_TEST_DATA_ROOT、DBACKUP_TEST_TEMP_ROOT、DBACKUP_TEST_TMP_ROOT、DBACKUP_TEST_RUNTIME_ROOT
 EOF
 }
@@ -25,7 +25,7 @@ if (( $# > 1 )); then usage >&2; exit 2; fi
 
 case "$command_name" in
   help|-h|--help) usage; exit 0 ;;
-  run|build|test|coverage|install) ;;
+  run|root|build|test|coverage) ;;
   *) usage >&2; exit 2 ;;
 esac
 
@@ -159,8 +159,14 @@ case "$command_name" in
     cmake --build "$build_dir" --parallel "${DBACKUP_JOBS:-2}"
     case "$command_name" in
       test) run_ctest_group "$build_dir" all ;;
-      install) cmake --install "$build_dir" --prefix "${DBACKUP_INSTALL_PREFIX:-${HOME}/.local}" ;;
       run) exec "$build_dir/BackupTool" ;;
+      root)
+        gui_env=()
+        for name in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR; do
+          if [[ -v "$name" ]]; then gui_env+=("$name=${!name}"); fi
+        done
+        exec sudo env "${gui_env[@]}" "$build_dir/BackupTool"
+        ;;
     esac
     ;;
 esac

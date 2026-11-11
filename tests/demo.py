@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
+import shutil
 import stat
 import sys
 
@@ -17,7 +19,7 @@ import dbackup_acceptance as tool  # noqa: E402
 DEFAULT_ROOT = Path("/home/ilm/DBackup-Demo")
 MARKER = tool.MARKER
 LAYOUT_VERSION = 2
-TOP_LEVEL = ("filters", "large-data", "special-files", "restore")
+TOP_LEVEL = ("common", "large-data", "special-files", "restore")
 
 
 class DemoError(RuntimeError):
@@ -81,6 +83,35 @@ def validate_layout(root: Path) -> None:
             raise tool.SafetyError(f"演示子目录缺失、类型不符或是符号链接：{path}")
 
 
+def clear_restore(root: Path) -> int:
+    """Remove restore contents while preserving the directory and sample sources."""
+    validate_layout(root)
+    restore = root / 'restore'
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise tool.SafetyError('当前 Python 不支持安全删除目录，拒绝清理')
+    # Refuse mounted filesystems, including bind mounts that can share st_dev.
+    try:
+        mountinfo = Path('/proc/self/mountinfo').read_text(encoding='utf-8')
+    except OSError as exc:
+        raise tool.SafetyError(f'无法检查挂载点：{exc}') from exc
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            raise tool.SafetyError('无法解析挂载点，拒绝清理')
+        mount = re.sub(r'\\([0-7]{3})', lambda match: chr(int(match.group(1), 8)), fields[4])
+        if mount == str(restore) or mount.startswith(str(restore) + '/'):
+            raise tool.SafetyError(f'恢复目录内存在挂载点，拒绝清理：{mount}')
+    count = 0
+    with os.scandir(restore) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+            count += 1
+    return count
+
+
 def validate_restore_target(root: Path, value: str) -> Path:
     restore_root = root / "restore"
     requested = Path(value).expanduser()
@@ -142,7 +173,7 @@ def comparison_report(source_name: str, restored_value: str, root: Path,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("compare",))
-    parser.add_argument("source", choices=("filters", "large-data", "special-files"))
+    parser.add_argument("source", choices=("common", "large-data", "special-files"))
     parser.add_argument("restored")
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
     parser.add_argument("--mtime-tolerance", type=float, default=0.0)

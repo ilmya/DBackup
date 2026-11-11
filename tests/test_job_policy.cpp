@@ -34,6 +34,21 @@ TEST(JobPolicy, RejectsContradictoryFilter) { auto job = validJob(); job.filter.
 TEST(JobPolicy, RejectsInvalidFormat) { auto job = validJob(); job.format = static_cast<PackFormat>(2); invalid(job); }
 TEST(JobPolicy, RejectsInvalidCompression) { auto job = validJob(); job.compression = static_cast<Compression>(4); invalid(job); }
 TEST(JobPolicy, RejectsRealtimeArchive) { auto job = validJob(); job.repository = false; job.realtime = true; invalid(job); }
+TEST(JobPolicy, AllowsRealtimeIncrementalFormatsAndRejectsInvalidModes) {
+    auto job = validJob();
+    job.repository = false;
+    job.tarIncremental = true;
+    job.format = PackFormat::Tar;
+    job.realtime = true;
+    job.scheduled = false;
+    job.encrypted = false;
+    QString error;
+    EXPECT_TRUE(job_policy::validate(job, error)) << error.toStdString();
+    job.format = PackFormat::Custom;
+    EXPECT_TRUE(job_policy::validate(job, error)) << error.toStdString();
+    job.repository = true;
+    invalid(job);
+}
 TEST(JobPolicy, RejectsUnencryptedRepository) { auto job = validJob(); job.encrypted = false; invalid(job); }
 TEST(JobPolicy, ValidatesIdentifier) {
     EXPECT_TRUE(job_policy::validId("Abc-123"));

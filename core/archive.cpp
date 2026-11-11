@@ -5,6 +5,7 @@
 #include "core/archive_tar.h"
 #include "core/backup_policy.h"
 #include "core/crypto.h"
+#include "core/incremental_archive.h"
 
 #include <algorithm>
 #include <cctype>
@@ -401,7 +402,7 @@ bool decodeFile(const std::string& path, const std::string& password, std::vecto
 // Restore a seekable tar by referring to its file ranges instead of retaining
 // their contents in the decoded metadata list.
 bool restoreTar(int fd, const std::string& destination, const OperationContext& context,
-                std::string& error, PackFormat format = PackFormat::Tar) {
+                std::string& error, PackFormat format = PackFormat::Tar, int destinationFd = -1) {
     std::vector<Entry> entries;
     std::vector<uint64_t> offsets;
     const bool decoded = format == PackFormat::Tar
@@ -453,7 +454,9 @@ bool restoreTar(int fd, const std::string& destination, const OperationContext& 
         }
         return true;
     };
-    return dbackup::archive_restore::restore(entries, destination, context, error, writer);
+    return destinationFd >= 0
+        ? dbackup::archive_restore::restoreAt(entries, destinationFd, context, error, writer)
+        : dbackup::archive_restore::restore(entries, destination, context, error, writer);
 }
 
 bool inspectPacked(const std::string& file, std::vector<ArchiveEntry>& output, std::string& error,
@@ -547,6 +550,146 @@ bool inspectPacked(const std::string& file, std::vector<ArchiveEntry>& output, s
     return true;
 }
 } // namespace
+
+bool dbackup::incremental::extractArchiveToFd(const std::string& path, int destinationFd,
+                                               const std::string& password,
+                                               const OperationContext& context,
+                                               std::string& error) try {
+    struct CloseFile {
+        int fd;
+        ~CloseFile() { if (fd >= 0) close(fd); }
+    } source{open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
+    if (source.fd < 0 || destinationFd < 0) {
+        error = "无法打开增量归档或恢复目录";
+        return false;
+    }
+    uint8_t magic[8]{};
+    ssize_t count;
+    do { count = pread(source.fd, magic, sizeof(magic), 0); } while (count < 0 && errno == EINTR);
+    const uint8_t currentMagic[] = {'D', 'B', 'P', 'K', 2, 0, 0, 0};
+    const bool wrapped = count == 8 && (!std::memcmp(magic, currentMagic, 8) ||
+                                       !std::memcmp(magic, "DBPK0002", 8));
+    if (!wrapped) {
+        const auto format = count == 8 && !std::memcmp(magic, "DBCS0001", 8)
+                                ? PackFormat::Custom : PackFormat::Tar;
+        return restoreTar(source.fd, {}, context, error, format, destinationFd);
+    }
+    struct CloseStream {
+        FILE* stream;
+        ~CloseStream() { if (stream) std::fclose(stream); }
+    } temporary{std::tmpfile()};
+    if (!temporary.stream) {
+        error = "无法创建归档暂存文件";
+        return false;
+    }
+    PackFormat format;
+    const int packed = fileno(temporary.stream);
+    if (!archive_blocks::decode(source.fd, packed, password, format, context, error))
+        return false;
+    return restoreTar(packed, {}, context, error, format, destinationFd);
+} catch (const std::bad_alloc&) {
+    error = "内存不足，无法恢复增量归档";
+    return false;
+}
+
+bool dbackup::incremental::writeSelectedArchive(
+    const std::vector<archive_scan::Entry>& scanned, const std::vector<std::string>& selected,
+    const std::string& destination, const PackOptions& options, const OperationContext& context,
+    std::string& error) try {
+    error.clear();
+    if ((options.format != PackFormat::Tar && options.format != PackFormat::Custom) || destination.empty()) {
+        error = "增量归档格式或目标路径无效";
+        return false;
+    }
+    std::set<std::string> wanted;
+    for (const auto& path : selected) {
+        if (!linux_file::validRelativePath(path) || !wanted.insert(path).second) {
+            error = "增量归档路径无效或重复: " + path;
+            return false;
+        }
+    }
+    std::vector<archive_scan::Entry> entries;
+    std::set<std::string> present;
+    for (const auto& item : scanned) {
+        if (!wanted.count(item.relativePath))
+            continue;
+        if (!present.insert(item.relativePath).second) {
+            error = "扫描结果包含重复路径: " + item.relativePath;
+            return false;
+        }
+        auto entry = item;
+        // A tar hard link must refer to an earlier regular-file entry in this
+        // archive. If its target is absent, store the content independently.
+        if (entry.type == 3 && !present.count(entry.linkTarget)) {
+            entry.type = 0;
+            entry.linkTarget.clear();
+        }
+        entries.push_back(std::move(entry));
+    }
+    if (present != wanted) {
+        error = "增量归档包含扫描结果中不存在的路径";
+        return false;
+    }
+    if (context.isCancelled()) {
+        error = "操作已取消";
+        return false;
+    }
+    std::string pattern = destination + ".incremental.XXXXXX";
+    std::vector<char> directory(pattern.begin(), pattern.end());
+    directory.push_back('\0');
+    if (!mkdtemp(directory.data())) {
+        error = "无法创建增量归档暂存目录: " + std::string(std::strerror(errno));
+        return false;
+    }
+    struct Staging {
+        std::string directory;
+        std::string archive;
+        ~Staging() { unlink(archive.c_str()); rmdir(directory.c_str()); }
+    } staging{directory.data(), std::string(directory.data()) + "/archive"};
+
+    std::vector<std::string> warnings;
+    OperationContext local = context;
+    local.noReplace = true;
+    local.warnings = &warnings;
+    local.onProgress = [&context](const OperationProgress& progress) {
+        if (progress.stage != OperationStage::Completed)
+            context.report(progress);
+    };
+    const bool plain = options.password.empty() &&
+                       (options.compression == Compression::None ||
+                        (options.compression == Compression::Deflate &&
+                         options.compressionLevel == 0));
+    const bool ok = plain ? createPlainTar(entries, staging.archive, local, local, 0, error, options.format)
+                          : createWrapped(entries, staging.archive, options, local, local, 0, error);
+    if (context.warnings)
+        context.warnings->insert(context.warnings->end(), warnings.begin(), warnings.end());
+    if (!ok)
+        return false;
+    if (!warnings.empty() || !error.empty()) {
+        if (error.empty())
+            error = warnings.front();
+        return false;
+    }
+    if (context.isCancelled()) {
+        error = "操作已取消";
+        return false;
+    }
+    const int result = context.noReplace
+        ? static_cast<int>(syscall(SYS_renameat2, AT_FDCWD, staging.archive.c_str(), AT_FDCWD,
+                                   destination.c_str(), 1u))
+        : rename(staging.archive.c_str(), destination.c_str());
+    if (result != 0) {
+        error = "提交增量归档失败: " + std::string(std::strerror(errno));
+        return false;
+    }
+    OperationProgress progress;
+    progress.stage = OperationStage::Completed;
+    context.report(progress);
+    return true;
+} catch (const std::bad_alloc&) {
+    error = "内存不足，无法创建增量归档";
+    return false;
+}
 
 bool ArchiveService::create(const std::string& source, const std::string& destination,
                             std::string& error) {

@@ -2,6 +2,7 @@
 
 #include "automation/job_manager.h"
 #include "core/repository.h"
+#include "core/incremental_chain.h"
 #include <QDir>
 #include <QFile>
 #include <QRegularExpression>
@@ -11,6 +12,8 @@ struct PlanResult {
     bool success = false;
     bool partial = false;
     std::string detail;
+    bool changesAvailable = false;
+    std::vector<std::string> added, modified, deleted;
 };
 
 // 按计划执行仓库快照或独立归档，并仅在完整成功时执行保留清理。
@@ -21,6 +24,38 @@ inline PlanResult executePlan(const BackupJob& job, const std::string& password,
     std::vector<std::string> sources;
     for (const auto& source : job.sources)
         sources.push_back(source.toUtf8().toStdString());
+    if (job.tarIncremental) {
+        const QString chain = QDir(job.destination).filePath("dbackup-" + job.id + "-tar-incremental");
+        PackOptions options;
+        options.format = job.format;
+        options.compression = job.compression;
+        options.password = password;
+        options.filter = job.filter;
+        dbackup::incremental::CreatedVersion version;
+        result.success = dbackup::incremental::createVersion(
+            chain.toUtf8().toStdString(), sources, options, context, version, result.detail);
+        if (!result.success)
+            return result;
+        result.changesAvailable = true;
+        result.added = std::move(version.added);
+        result.modified = std::move(version.modified);
+        result.deleted = std::move(version.deleted);
+        if (context.isCancelled()) {
+            result.success = false;
+            result.detail = "操作已取消；已提交的备份版本保留，未清理旧版本";
+            return result;
+        }
+        size_t removed = 0;
+        std::string pruneError;
+        if (!dbackup::incremental::pruneVersions(chain.toUtf8().toStdString(), password,
+                                                  job.retention, context, removed, pruneError, &options)) {
+            result.success = false;
+            result.detail = "备份版本已提交，但清理旧版本失败: " + pruneError;
+            return result;
+        }
+        result.detail = chain.toUtf8().toStdString();
+        return result;
+    }
     if (job.repository) {
         SnapshotOptions options;
         options.sources = sources;

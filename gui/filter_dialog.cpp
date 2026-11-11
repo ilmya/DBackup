@@ -51,6 +51,7 @@ QStringList ruleLines(const QPlainTextEdit* edit) {
 } // namespace
 
 FilterDialog::FilterDialog(const FilterOptions& options, QWidget* parent) : QDialog(parent) {
+    setObjectName("filterDialog");
     setWindowTitle(tr("筛选规则"));
     setMinimumSize(720, 590);
     auto* root = new QVBoxLayout(this);

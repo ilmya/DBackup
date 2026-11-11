@@ -22,6 +22,7 @@
 #include "automation/job_manager.h"
 #include "automation/plan_executor.h"
 #include "core/repository.h"
+#include "core/incremental_chain.h"
 #include "test_support.h"
 
 namespace {
@@ -158,6 +159,90 @@ TEST_F(JobManagerTest, PersistsManualArchivePlanAndRejectsRealtimeArchive) {
     job.realtime = true;
     EXPECT_FALSE(restored.upsert(job, error));
     EXPECT_FALSE(restored.jobs().first().realtime);
+}
+
+TEST_F(JobManagerTest, PersistsAndExecutesRealtimeTarIncrementalPlan) {
+    QTemporaryDir data;
+    ASSERT_TRUE(data.isValid());
+    ASSERT_TRUE(QDir().mkpath(data.filePath("source")));
+    QFile source(data.filePath("source/file"));
+    ASSERT_TRUE(source.open(QIODevice::WriteOnly));
+    ASSERT_EQ(source.write("first"), 5);
+    source.close();
+    auto job = makeJob();
+    job.sources = {data.filePath("source")};
+    job.destination = data.path();
+    job.repository = false;
+    job.tarIncremental = true;
+    job.encrypted = false;
+    job.format = PackFormat::Tar;
+    job.compression = Compression::None;
+    job.scheduled = false;
+    job.realtime = true;
+    QString error;
+    {
+        JobManager manager(nullptr, configPath());
+        ASSERT_TRUE(manager.upsert(job, error)) << error.toStdString();
+    }
+    JobManager restored(nullptr, configPath());
+    ASSERT_EQ(restored.jobs().size(), 1);
+    const auto loaded = restored.jobs().first();
+    EXPECT_TRUE(loaded.tarIncremental);
+    EXPECT_TRUE(loaded.realtime);
+    EXPECT_FALSE(loaded.repository);
+    const auto first = executePlan(loaded, "");
+    ASSERT_TRUE(first.success) << first.detail;
+    ASSERT_TRUE(source.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(source.write("second"), 6);
+    source.close();
+    const auto second = executePlan(loaded, "");
+    ASSERT_TRUE(second.success) << second.detail;
+    const auto chain = QDir(job.destination).filePath("dbackup-" + job.id + "-tar-incremental");
+    std::vector<dbackup::incremental::VersionInfo> versions;
+    std::string detail;
+    ASSERT_TRUE(dbackup::incremental::listVersions(chain.toStdString(), "", {}, versions, detail))
+        << detail;
+    ASSERT_EQ(versions.size(), 2u);
+    EXPECT_TRUE(versions[0].full);
+    EXPECT_FALSE(versions[1].full);
+}
+
+TEST_F(JobManagerTest, PersistsAndExecutesRealtimeCustomIncrementalPlan) {
+    QTemporaryDir data;
+    ASSERT_TRUE(data.isValid());
+    ASSERT_TRUE(QDir().mkpath(data.filePath("source")));
+    QFile source(data.filePath("source/file"));
+    ASSERT_TRUE(source.open(QIODevice::WriteOnly));
+    ASSERT_EQ(source.write("first"), 5);
+    source.close();
+    auto job = makeJob();
+    job.sources = {data.filePath("source")};
+    job.destination = data.path();
+    job.repository = false;
+    job.tarIncremental = true;
+    job.encrypted = false;
+    job.format = PackFormat::Custom;
+    job.compression = Compression::None;
+    job.scheduled = false;
+    job.realtime = true;
+    QString error;
+    { JobManager manager(nullptr, configPath()); ASSERT_TRUE(manager.upsert(job, error)) << error.toStdString(); }
+    JobManager restored(nullptr, configPath());
+    ASSERT_EQ(restored.jobs().size(), 1);
+    const auto loaded = restored.jobs().first();
+    EXPECT_EQ(loaded.format, PackFormat::Custom);
+    const auto result = executePlan(loaded, "");
+    ASSERT_TRUE(result.success) << result.detail;
+    const auto chain = QDir(job.destination).filePath("dbackup-" + job.id + "-tar-incremental");
+    std::vector<dbackup::incremental::VersionInfo> versions;
+    std::string detail;
+    ASSERT_TRUE(dbackup::incremental::listVersions(chain.toStdString(), "", {}, versions, detail)) << detail;
+    ASSERT_EQ(versions.size(), 1u);
+    ASSERT_TRUE(dbackup::incremental::restoreVersion(chain.toStdString(), versions[0].sequence, "",
+                data.filePath("restored").toStdString(), {}, detail)) << detail;
+    QFile output(data.filePath("restored/source/file"));
+    ASSERT_TRUE(output.open(QIODevice::ReadOnly));
+    EXPECT_EQ(output.readAll(), QByteArray("first"));
 }
 
 TEST_F(JobManagerTest, ValidatesPlanFieldsAndRejectsUnsafeIdentifiers) {
@@ -425,6 +510,71 @@ TEST_F(JobManagerTest, RealtimeJobWatchesSelectedSingleFile) {
     EXPECT_TRUE(requested.changedPaths.contains(selected));
     if (executions)
         manager.markFinished(job.id, true, "done");
+}
+
+TEST_F(JobManagerTest, RealtimeChangeCreatesTarIncrementAndRestoresIt) {
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    const QString selected = directory.filePath("source.txt");
+    QFile file(selected);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    ASSERT_EQ(file.write("before"), 6);
+    file.close();
+    auto job = makeJob();
+    job.scheduled = false;
+    job.realtime = true;
+    job.repository = false;
+    job.tarIncremental = true;
+    job.encrypted = false;
+    job.format = PackFormat::Tar;
+    job.compression = Compression::None;
+    job.sources = {selected};
+    job.destination = directory.path();
+    const auto initial = executePlan(job, "");
+    ASSERT_TRUE(initial.success) << initial.detail;
+
+    JobManager manager(nullptr, configPath());
+    int changes = 0;
+    PlanResult result;
+    manager.setExecutor([&](const BackupJob& run) {
+        result = executePlan(run, "");
+        if (run.changedPaths.contains(selected))
+            ++changes;
+        manager.markFinished(run.id, result.success, QString::fromStdString(result.detail), result.partial);
+    });
+    QString error;
+    ASSERT_TRUE(manager.upsert(job, error)) << error.toStdString();
+    manager.start();
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 4000 &&
+           manager.jobs().first().realtimeStatus != QString::fromUtf8("监控中")) {
+        QCoreApplication::processEvents();
+        QThread::msleep(20);
+    }
+    ASSERT_EQ(manager.jobs().first().realtimeStatus, QString::fromUtf8("监控中"));
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(file.write("after"), 5);
+    file.close();
+    timer.restart();
+    while (timer.elapsed() < 10000 && !changes) {
+        QCoreApplication::processEvents();
+        QThread::msleep(20);
+    }
+    ASSERT_GT(changes, 0);
+    ASSERT_TRUE(result.success) << result.detail;
+    const QString chain = QDir(job.destination).filePath("dbackup-" + job.id + "-tar-incremental");
+    std::vector<dbackup::incremental::VersionInfo> versions;
+    std::string detail;
+    ASSERT_TRUE(dbackup::incremental::listVersions(chain.toStdString(), "", {}, versions, detail))
+        << detail;
+    ASSERT_GE(versions.size(), 2u);
+    const auto restored = directory.filePath("restored");
+    ASSERT_TRUE(dbackup::incremental::restoreVersion(chain.toStdString(), versions.back().sequence,
+                                                      "", restored.toStdString(), {}, detail)) << detail;
+    QFile restoredFile(QDir(restored).filePath("source.txt"));
+    ASSERT_TRUE(restoredFile.open(QIODevice::ReadOnly));
+    EXPECT_EQ(restoredFile.readAll(), QByteArray("after"));
 }
 
 TEST_F(JobManagerTest, RealtimeContinuesWhenSubdirectoryCannotBeRead) {

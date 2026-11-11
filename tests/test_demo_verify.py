@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 import os
+from contextlib import redirect_stdout
+import io
+import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -9,6 +13,85 @@ import demo_verify as verify
 
 
 class DemoVerifyTest(unittest.TestCase):
+    def test_clear_restore_preserves_sources_and_symlink_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / 'demo'
+            root.mkdir()
+            for name in ('common', 'large-data', 'special-files', 'restore'):
+                (root / name).mkdir()
+            marker = verify.tool.write_marker(root)
+            marker['demoLayoutVersion'] = verify.demo.LAYOUT_VERSION
+            (root / verify.demo.MARKER).write_text(json.dumps(marker), encoding='utf-8')
+            (root / 'common' / 'source').write_text('keep')
+            outside = base / 'outside'
+            outside.mkdir()
+            (outside / 'sentinel').write_text('keep')
+            (root / 'restore' / 'nested').mkdir()
+            (root / 'restore' / 'nested' / 'result').write_text('delete')
+            (root / 'restore' / '.hidden').write_text('delete')
+            (root / 'restore' / 'link').symlink_to(outside, target_is_directory=True)
+            self.assertEqual(verify.demo.clear_restore(root), 3)
+            self.assertEqual(list((root / 'restore').iterdir()), [])
+            self.assertEqual((root / 'common' / 'source').read_text(), 'keep')
+            self.assertEqual((outside / 'sentinel').read_text(), 'keep')
+
+    def test_clear_restore_rejects_symlinked_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / 'demo'
+            root.mkdir()
+            for name in ('common', 'large-data', 'special-files'):
+                (root / name).mkdir()
+            outside = base / 'outside'
+            outside.mkdir()
+            (outside / 'sentinel').write_text('keep')
+            (root / 'restore').symlink_to(outside, target_is_directory=True)
+            marker = verify.tool.write_marker(root)
+            marker['demoLayoutVersion'] = verify.demo.LAYOUT_VERSION
+            (root / verify.demo.MARKER).write_text(json.dumps(marker), encoding='utf-8')
+            with self.assertRaises(verify.tool.SafetyError):
+                verify.demo.clear_restore(root)
+            self.assertEqual((outside / 'sentinel').read_text(), 'keep')
+
+    def test_clear_restore_rejects_nested_mount(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'restore').mkdir()
+            (root / 'restore' / 'keep').write_text('keep')
+            mountinfo = f'1 0 0:1 / {root}/restore/mounted rw - tmpfs tmpfs rw\n'
+            with patch.object(verify.demo, 'validate_layout'), \
+                 patch.object(verify.demo.Path, 'read_text', return_value=mountinfo):
+                with self.assertRaises(verify.tool.SafetyError):
+                    verify.demo.clear_restore(root)
+            self.assertEqual((root / 'restore' / 'keep').read_text(), 'keep')
+
+    def test_console_details_include_fail_skip_and_warning_but_not_pass(self):
+        rows = [verify.result('PASS', 'hash', 'ok', 'same'),
+                verify.result('FAIL', '备份', 'large-data', '磁盘空间不足\n请检查空间'),
+                verify.result('SKIP', '设备节点', 'nodes/device', '权限不足'),
+                verify.result('WARN', '恢复警告', 'socket', '服务未恢复'),
+                verify.result('WARN', '恢复警告', 'socket', '套接字节点不包含原服务或连接，可能占用服务路径')]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            verify.print_details(rows)
+        text = output.getvalue()
+        self.assertIn('[失败] 备份 · 大文件：磁盘空间不足', text)
+        self.assertIn('请检查空间', text)
+        self.assertIn('[跳过] 设备节点 · nodes/device：权限不足', text)
+        self.assertIn('[警告] 恢复警告 · socket：服务未恢复', text)
+        self.assertIn('[提示] 恢复提示 · socket：套接字节点不包含原服务或连接', text)
+        self.assertNotIn('[通过]', text)
+
+    def test_cli_failure_hides_progress_but_keeps_signal_and_diagnostics(self):
+        proc = subprocess.CompletedProcess([], -6, '',
+            '{"stage":"reading","path":"file"}\nterminate called after throwing std::bad_alloc\n')
+        detail = verify.cli_failure(proc)
+        self.assertIn('SIGABRT', detail)
+        self.assertIn('std::bad_alloc', detail)
+        self.assertIn('bash build.sh test', detail)
+        self.assertNotIn('"stage"', detail)
+
     def test_regular_file_bytes_counts_links_without_following_symlinks(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -18,12 +101,18 @@ class DemoVerifyTest(unittest.TestCase):
             self.assertEqual(verify.regular_file_bytes(root), 6)
 
     def test_arguments_and_defaults(self):
-        options = verify.parser().parse_args(['--format', 'tar', '--compression', 'none', '--encrypt', '--group', 'filters'])
+        options = verify.parser().parse_args(['--format', 'tar', '--compression', 'none', '--encrypt', '--group', 'common'])
         self.assertEqual((options.format, options.compression, options.encrypt, options.group),
-                         ('tar', 'none', True, ['filters']))
-        self.assertEqual(verify.parser().parse_args([]).group, None)
+                         ('tar', 'none', True, ['common']))
+        defaults = verify.parser().parse_args([])
+        self.assertIsNone(defaults.group)
+        self.assertTrue(defaults.encrypt)
+        self.assertEqual(verify.TEST_PASSWORD, '123')
+        self.assertFalse(verify.parser().parse_args(['--no-encrypt']).encrypt)
         with self.assertRaises(SystemExit):
             verify.parser().parse_args(['--compression', 'invalid'])
+        with self.assertRaises(SystemExit):
+            verify.parser().parse_args(['--memory-mib', '1024'])
 
     def test_exit_status_distinguishes_expected_skip_and_failure(self):
         skipped = [verify.result('SKIP', 'device', 'node', 'expected')]
@@ -34,11 +123,22 @@ class DemoVerifyTest(unittest.TestCase):
         self.assertEqual(verify.exit_status(failed, False), 1)
         self.assertEqual(verify.exit_status(failed, True), 1)
 
+    def test_default_encryption_uses_fixed_demo_password(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'restore').mkdir()
+            options = verify.parser().parse_args(['--group', 'common'])
+            with patch.dict(os.environ, {'DBACKUP_TEST_PASSWORD': 'outside-value'}), \
+                 patch.object(verify.demo, 'validate_layout'), \
+                 patch.object(verify, 'execute', return_value=({'ok': False, 'error': 'expected'}, 0)) as execute:
+                self.assertEqual(verify.run(root, Path('/unused-cli'), options), 1)
+            self.assertEqual(execute.call_args.args[2], '123')
+
     def test_runs_create_separate_result_directories(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'restore').mkdir()
-            options = verify.parser().parse_args(['--group', 'filters'])
+            options = verify.parser().parse_args(['--group', 'common'])
             with patch.object(verify.demo, 'validate_layout'), \
                  patch.object(verify, 'execute', return_value=({'ok': False, 'error': 'expected failure'}, 0)):
                 self.assertEqual(verify.run(root, Path('/unused-cli'), options), 1)
@@ -96,7 +196,7 @@ class DemoVerifyTest(unittest.TestCase):
             fake = Path(temp) / 'cli'
             fake.write_text('#!/bin/sh\necho \'{"ok":false,"error":"wrong password"}\'\nexit 1\n')
             fake.chmod(0o700)
-            value, _ = verify.execute(fake, [], 'test-only', 256)
+            value, _ = verify.execute(fake, [], 'test-only')
             self.assertFalse(value['ok'])
             self.assertIn('wrong password', value['error'])
 

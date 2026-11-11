@@ -2,10 +2,9 @@
 
 #include "core/archive.h"
 #include <QMainWindow>
-#include <QMap>
+#include <QPointer>
 #include <QStringList>
 #include <atomic>
-#include <memory>
 
 class QLabel;
 class QLineEdit;
@@ -20,7 +19,9 @@ class QStackedWidget;
 class QVBoxLayout;
 class QSystemTrayIcon;
 class QCloseEvent;
+class QDialog;
 class JobManager;
+struct BackupJob;
 
 class MainWindow final : public QMainWindow {
   public:
@@ -39,7 +40,7 @@ class MainWindow final : public QMainWindow {
     // 创建定时/实时任务列表及编辑操作所在的页面。
     QWidget* createSchedulePage();
     // 创建本地增量仓库快照列表和恢复入口。
-    QWidget* createHistoryPage();
+    QWidget* createHistoryPage(const BackupJob& job);
     // 创建凭据和日志等通用设置页。
     QWidget* createSettingsPage();
     // 创建统一标题、内容布局和页边距的功能页容器。
@@ -83,7 +84,6 @@ class MainWindow final : public QMainWindow {
     QLineEdit* archivePath_ = nullptr;
     QLineEdit* restoreTarget_ = nullptr;
     QLineEdit* restorePassword_ = nullptr;
-    QCheckBox* restoreDevices_ = nullptr;
     QPushButton* restoreButton_ = nullptr;
     QPlainTextEdit* activityLog_ = nullptr;
     QProgressBar* progress_ = nullptr;
@@ -91,8 +91,9 @@ class MainWindow final : public QMainWindow {
     QPushButton* cancelButton_ = nullptr;
     QSystemTrayIcon* tray_ = nullptr;
     JobManager* jobs_ = nullptr;
+    QPointer<QDialog> planDialog_;
+    QPointer<QDialog> planDetails_;
     std::atomic_bool cancelled_{false};
-    QMap<QString, std::shared_ptr<std::atomic_bool>> planCancellations_;
     bool quitting_ = false;
     FilterOptions filters_;
     bool busy_ = false;

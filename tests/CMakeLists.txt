@@ -8,6 +8,7 @@ add_executable(BackupToolTests
     test_linux_filesystem.cpp
     test_repository.cpp
     test_repository_policy.cpp
+    test_incremental_diff.cpp
 )
 
 target_link_libraries(BackupToolTests PRIVATE

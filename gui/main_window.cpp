@@ -2,8 +2,10 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -19,6 +21,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QInputDialog>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
@@ -26,6 +29,8 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRadioButton>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -38,18 +43,21 @@
 #include <QTabBar>
 #include <QTableWidget>
 #include <QThread>
+#include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <memory>
+#include <unistd.h>
 
 #include "automation/job_manager.h"
 #include "automation/plan_executor.h"
 #include "core/credential_store.h"
+#include "core/incremental_chain.h"
 #include "core/md5.h"
 #include "core/repository.h"
 #include "gui/backup_options.h"
 #include "gui/filter_dialog.h"
 #include "gui/plan_result.h"
-#include "gui/restore_options.h"
 #include "gui/source_tree.h"
 
 namespace {
@@ -59,6 +67,39 @@ QPushButton* button(const QString& text, bool primary = false) {
     if (primary)
         result->setProperty("primary", true);
     result->setCursor(Qt::PointingHandCursor);
+    return result;
+}
+
+QString changeSummary(const std::vector<std::string>& added,
+                      const std::vector<std::string>& modified,
+                      const std::vector<std::string>& deleted) {
+    QStringList groups;
+    const auto addGroup = [&groups](const QString& label, const std::vector<std::string>& paths) {
+        if (paths.empty()) return;
+        QStringList names;
+        for (const auto& path : paths) {
+            QString value = QString::fromUtf8(path.c_str());
+            const auto slash = value.indexOf('/');
+            if (slash >= 0) value = value.mid(slash + 1);
+            names << value;
+        }
+        groups << label + names.join(QObject::tr("、"));
+    };
+    addGroup(QObject::tr("添加："), added);
+    addGroup(QObject::tr("修改："), modified);
+    addGroup(QObject::tr("删除："), deleted);
+    return groups.isEmpty() ? QObject::tr("无文件变化") : groups.join(QObject::tr("；"));
+}
+
+QString displayPlanResult(const BackupJob& job) {
+    QString result = job.lastResult;
+    if (result.startsWith(QObject::tr("成功：/")))
+        return QObject::tr("成功：备份完成，文件变化分类不可用");
+    for (const auto& source : job.sources) {
+        const QString prefix = QDir::cleanPath(source) + '/';
+        result.replace(prefix, QString());
+        result.replace(QDir::cleanPath(source), QFileInfo(source).fileName());
+    }
     return result;
 }
 
@@ -118,7 +159,8 @@ QString stageName(OperationStage stage) {
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle(tr("DBackup · 备份管理器"));
+    setWindowTitle(geteuid() == 0 ? tr("DBackup · 备份管理器（root 模式）")
+                                  : tr("DBackup · 备份管理器"));
     resize(920, 650);
     setMinimumSize(860, 600);
     auto* root = new QWidget;
@@ -131,12 +173,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     pages_->addWidget(createRestorePage());
     jobs_ = new JobManager(this);
     pages_->addWidget(createSchedulePage());
-    pages_->addWidget(createHistoryPage());
     pages_->addWidget(createSettingsPage());
 
     auto* tabs = new QTabBar;
     tabs->setObjectName("mainNavigation");
-    for (const auto& name : {tr("备份"), tr("恢复"), tr("自动任务"), tr("备份快照")})
+    for (const auto& name : {tr("备份"), tr("恢复"), tr("自动任务")})
         tabs->addTab(name);
     connect(tabs, &QTabBar::currentChanged, this, [this](int index) {
         if (index >= 0)
@@ -155,7 +196,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             tabs->setCurrentIndex(index);
     });
     auto* settingsMenu = menuBar()->addMenu(tr("设置"));
-    settingsMenu->addAction(tr("应用设置"), this, [this] { pages_->setCurrentIndex(4); });
+    settingsMenu->addAction(tr("应用设置"), this, [this] { pages_->setCurrentIndex(3); });
     layout->addWidget(tabs);
     layout->addWidget(pages_, 1);
     setCentralWidget(root);
@@ -194,12 +235,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         appendLog(jobs_->loadError(), true);
         QMessageBox::warning(this, tr("计划读取失败"), jobs_->loadError());
     }
-    auto* trayMenu = new QMenu(this);
-    trayMenu->addAction(tr("打开 DBackup"), this, [this] {
+    auto showApp = [this] {
         showNormal();
-        raise();
-        activateWindow();
-    });
+        QWidget* window = QApplication::activeModalWidget();
+        if (!window || (window != this && !isAncestorOf(window)))
+            window = this;
+        window->raise();
+        window->activateWindow();
+    };
+    auto* trayMenu = new QMenu(this);
+    trayMenu->addAction(tr("打开 DBackup"), this, showApp);
     trayMenu->addAction(tr("暂停自动任务"), this, [this] { jobs_->pause(true); });
     trayMenu->addAction(tr("继续自动任务"), this, [this] { jobs_->pause(false); });
     trayMenu->addSeparator();
@@ -212,23 +257,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tray_->setToolTip("DBackup");
     tray_->setContextMenu(trayMenu);
     tray_->show();
-    connect(tray_, &QSystemTrayIcon::activated, this, [this](auto reason) {
-        if (reason == QSystemTrayIcon::Trigger) {
-            showNormal();
-            raise();
-        }
+    connect(tray_, &QSystemTrayIcon::activated, this, [showApp](auto reason) {
+        if (reason == QSystemTrayIcon::Trigger)
+            showApp();
     });
     jobs_->setExecutor([this](const BackupJob& job) {
         appendLog(tr("开始执行计划：%1").arg(job.name));
-        auto cancel = std::make_shared<std::atomic_bool>(false);
-        planCancellations_[job.id] = cancel;
-        QThread* worker = QThread::create([this, job, cancel] {
+        QThread* worker = QThread::create([this, job] {
             std::string password, error;
             const bool credentialOk =
                 !job.encrypted ||
                 CredentialStore::load(("job/" + job.id).toStdString(), password, error);
             OperationContext context;
-            context.cancelled = cancel.get();
             std::string lastPath;
             OperationStage lastStage = OperationStage::Completed;
             context.onProgress = [this, job, &lastPath,
@@ -252,20 +292,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             error = result.detail;
             QMetaObject::invokeMethod(
                 this,
-                [this, job, ok, error, result, cancel] {
-                    const bool cancelled = !ok && cancel->load();
-                    planCancellations_.remove(job.id);
+                [this, job, ok, error, result] {
                     const QString detail = QString::fromUtf8(error.c_str());
                     QString recent = detail;
-                    if (job.realtimeTriggered && ok)
-                        recent = realtimeResultDetail(job, detail, result.partial);
-                    jobs_->markFinished(job.id, ok, recent, result.partial, cancelled);
+                    if (ok && result.changesAvailable)
+                        recent = changeSummary(result.added, result.modified, result.deleted);
+                    else if (ok)
+                        recent = tr("备份完成，文件变化分类不可用") +
+                                 (result.partial ? tr("；部分文件未备份，详见活动日志") : QString());
+                    jobs_->markFinished(job.id, ok, recent, result.partial, false);
                     appendLog(ok ? (result.partial
                                         ? tr("计划“%1”部分完成：%2")
                                               .arg(job.name, QString::fromUtf8(error.c_str()))
                                         : tr("计划“%1”完成：%2")
                                               .arg(job.name, QString::fromUtf8(error.c_str())))
-                                 : (cancelled ? tr("计划“%1”已取消：%2") : tr("计划“%1”失败：%2"))
+                                 : tr("计划“%1”失败：%2")
                                        .arg(job.name, QString::fromUtf8(error.c_str())),
                               !ok || result.partial);
                 },
@@ -356,31 +397,6 @@ QWidget* MainWindow::createBackupPage() {
     targetRow->addWidget(backupTarget_, 1);
     targetRow->addWidget(browse);
     targetLayout->addLayout(targetRow);
-    auto* fileInfo = new QLabel(tr("选择文件查看信息"));
-    fileInfo->setObjectName("selectedSourceInfo");
-    fileInfo->setProperty("muted", true);
-    fileInfo->setWordWrap(true);
-    connect(
-        sourceTree_->selectionModel(), &QItemSelectionModel::currentChanged, this,
-        [this, fileInfo](const QModelIndex& current) {
-            if (!current.isValid()) {
-                fileInfo->setText(tr("选择文件查看信息"));
-                return;
-            }
-            const QFileInfo info = sourceModel_->fileInfo(current);
-            const QString type =
-                info.isSymLink()
-                    ? tr("符号链接")
-                    : (info.isDir() ? tr("目录") : (info.isFile() ? tr("文件") : tr("特殊文件")));
-            const QString size =
-                info.isFile() && !info.isSymLink()
-                    ? humanSize(static_cast<uint64_t>(qMax<qint64>(0, info.size())))
-                    : tr("—");
-            fileInfo->setText(tr("%1 · %2 · %3\n%4")
-                                  .arg(type, size, info.lastModified().toString("yyyy-MM-dd HH:mm"),
-                                       info.absoluteFilePath()));
-        });
-    targetLayout->addWidget(fileInfo);
     backupOptions_ = new BackupOptionsWidget(nullptr, false);
     targetLayout->addWidget(backupOptions_);
     auto* filter = new QWidget;
@@ -446,11 +462,9 @@ QWidget* MainWindow::createRestorePage() {
     grid->addWidget(targetBrowse, 1, 2);
     grid->addWidget(new QLabel(tr("解密密码")), 2, 0);
     grid->addWidget(restorePassword_, 2, 1);
-    restoreDevices_ = createDeviceRestoreOption();
     restoreButton_ = button(tr("开始恢复"), true);
     restoreButton_->setMinimumWidth(95);
     restoreButton_->setMaximumWidth(120);
-    grid->addWidget(restoreDevices_, 3, 1);
     grid->addWidget(restoreButton_, 3, 2);
     layout->addWidget(form);
     connect(restoreButton_, &QPushButton::clicked, this, &MainWindow::startRestore);
@@ -462,9 +476,13 @@ QWidget* MainWindow::createSchedulePage() {
     QVBoxLayout* layout = nullptr;
     QWidget* page = createPageShell(tr("备份计划"), &layout);
     auto* table = new QTableWidget(0, 7);
+    table->setAlternatingRowColors(true);
     table->setHorizontalHeaderLabels(
         {tr("名称"), tr("类型"), tr("方式"), tr("下次运行"), tr("状态"), tr("最近成功"), tr("最近结果")});
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     table->horizontalHeader()->setStretchLastSection(true);
     auto refresh = [this, table] {
         table->setRowCount(0);
@@ -474,13 +492,14 @@ QWidget* MainWindow::createSchedulePage() {
             QString mode = job.scheduled ? (job.realtime ? tr("定时 + 实时") : tr("定时"))
                                          : (job.realtime ? tr("实时") : tr("手动"));
             QStringList values = {job.name,
-                                  job.repository ? tr("版本仓库") : tr("独立归档"),
+                                  job.tarIncremental ? tr("增量归档") :
+                                      (job.repository ? tr("版本仓库") : tr("独立归档")),
                                   mode,
                                   job.nextRun.toString("yyyy-MM-dd HH:mm"),
                                   !job.enabled ? tr("停用")
                                                : (job.realtime ? job.realtimeStatus : tr("启用")),
                                   job.lastSuccess.isValid() ? job.lastSuccess.toString("yyyy-MM-dd HH:mm") : tr("暂无"),
-                                  job.lastResult};
+                                  displayPlanResult(job)};
             for (int c = 0; c < values.size(); ++c) {
                 auto* item = new QTableWidgetItem(values[c]);
                 item->setData(Qt::UserRole, job.id);
@@ -494,8 +513,11 @@ QWidget* MainWindow::createSchedulePage() {
     auto* actions = new QHBoxLayout;
     auto *add = button(tr("新建"), true), *edit = button(tr("编辑")), *run = button(tr("立即运行")),
          *toggle = button(tr("启用/停用")), *remove = button(tr("删除")),
-         *details = button(tr("结果详情")), *cancelRun = button(tr("取消运行"));
-    for (auto* item : {add, edit, run, toggle, remove, details, cancelRun})
+         *details = button(tr("详情"));
+    add->setObjectName("addPlan");
+    details->setObjectName("planDetailsButton");
+    table->setObjectName("planTable");
+    for (auto* item : {add, edit, run, toggle, remove, details})
         actions->addWidget(item);
     actions->addStretch();
     layout->addLayout(actions);
@@ -509,20 +531,30 @@ QWidget* MainWindow::createSchedulePage() {
         return {};
     };
     auto configure = [this, refresh](BackupJob job, bool isNew) {
-        QDialog dialog(this);
-        dialog.setWindowTitle(isNew ? tr("新建备份计划") : tr("编辑备份计划"));
-        dialog.resize(900, 650);
-        auto* outer = new QVBoxLayout(&dialog);
+        if (planDialog_) {
+            planDialog_->showNormal();
+            planDialog_->raise();
+            planDialog_->activateWindow();
+            return;
+        }
+        auto* dialog = new QDialog(nullptr);
+        dialog->setObjectName("planEditor");
+        planDialog_ = dialog;
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(isNew ? tr("新建备份计划") : tr("编辑备份计划"));
+        dialog->resize(900, 650);
+        connect(this, &QObject::destroyed, dialog, &QObject::deleteLater);
+        auto* outer = new QVBoxLayout(dialog);
         auto* body = new QHBoxLayout;
-        auto* model = new SourceTreeModel(&dialog);
+        auto* model = new SourceTreeModel(dialog);
         auto selectedRules = isNew ? sourceModel_->rules() : job.filter.sourceRules;
         if (!isNew && selectedRules.empty())
             for (const auto& source : job.sources)
                 selectedRules.push_back({source.toUtf8().toStdString(), true});
         model->setRules(selectedRules);
-        auto* tree = createSourceTree(model, &dialog);
+        auto* tree = createSourceTree(model, dialog);
         body->addWidget(tree, 2);
-        auto* formWidget = new QWidget(&dialog);
+        auto* formWidget = new QWidget(dialog);
         auto* form = new QFormLayout(formWidget);
         auto* name = new QLineEdit(isNew ? tr("备份计划") : job.name);
         auto* target = new QLineEdit(job.destination);
@@ -530,62 +562,92 @@ QWidget* MainWindow::createSchedulePage() {
         auto* targetRow = new QHBoxLayout;
         targetRow->addWidget(target);
         targetRow->addWidget(choose);
-        connect(choose, &QPushButton::clicked, &dialog, [&dialog, target] {
+        connect(choose, &QPushButton::clicked, dialog, [dialog, target] {
             const auto path = QFileDialog::getExistingDirectory(
-                &dialog, QObject::tr("选择保存目录"), target->text());
+                dialog, QObject::tr("选择保存目录"), target->text());
             if (!path.isEmpty())
                 target->setText(path);
         });
-        auto* options = new BackupOptionsWidget(&dialog);
+        auto* options = new BackupOptionsWidget(dialog);
         if (isNew) {
             const auto current = backupOptions_->options();
             options->setOptions(backupOptions_->incremental(), backupOptions_->encryptionEnabled(),
                                 current.format, current.compression);
-        } else
-            options->setOptions(job.repository, job.encrypted, job.format, job.compression);
-        auto* scheduled = new QCheckBox(tr("定时"));
-        scheduled->setChecked(job.scheduled);
-        auto* realtime = new QCheckBox(tr("实时（仅版本仓库）"));
-        realtime->setChecked(job.realtime);
+        } else {
+            options->setOptions(job.repository, job.encrypted, job.format, job.compression,
+                                job.tarIncremental);
+            if (job.encrypted) {
+                std::string secret, detail;
+                if (CredentialStore::load(("job/" + job.id).toStdString(), secret, detail))
+                    options->setPassword(QString::fromUtf8(secret.c_str()));
+            }
+        }
+        auto* runModes = new QButtonGroup(dialog);
+        auto* scheduled = new QRadioButton(tr("定时"));
+        scheduled->setObjectName("planScheduled");
+        auto* realtime = new QRadioButton(tr("实时"));
+        realtime->setObjectName("planRealtime");
+        runModes->addButton(scheduled);
+        runModes->addButton(realtime);
+        if (job.scheduled != job.realtime) {
+            scheduled->setChecked(job.scheduled);
+            realtime->setChecked(job.realtime);
+        }
         auto* modeRow = new QHBoxLayout;
         modeRow->addWidget(scheduled);
         modeRow->addWidget(realtime);
+        if (!isNew && job.scheduled && job.realtime) {
+            auto* legacy = new QLabel(tr("原计划同时启用两种方式，请选择一种"));
+            legacy->setWordWrap(true);
+            modeRow->addWidget(legacy);
+        }
+        if (!isNew && !job.scheduled && !job.realtime) {
+            auto* manual = new QRadioButton(tr("手动（已有计划）"));
+            runModes->addButton(manual);
+            modeRow->addWidget(manual);
+            manual->setChecked(true);
+        }
         modeRow->addStretch();
         auto* cron = new QLineEdit(job.cron.isEmpty() ? QStringLiteral("0 2 * * *") : job.cron);
+        cron->setObjectName("planCron");
+        cron->setEnabled(scheduled->isChecked());
+        connect(scheduled, &QRadioButton::toggled, cron, &QWidget::setEnabled);
+        options->setRepositoryRequired(realtime->isChecked());
+        connect(realtime, &QRadioButton::toggled, options, &BackupOptionsWidget::setRepositoryRequired);
         auto* retention = new QSpinBox;
         retention->setRange(1, 999);
         retention->setValue(job.retention);
-        FilterOptions filter = isNew ? filters_ : job.filter;
+        auto filter = std::make_shared<FilterOptions>(isNew ? filters_ : job.filter);
         auto* filterButton = button(tr("筛选配置…"));
-        connect(filterButton, &QPushButton::clicked, &dialog, [&dialog, &filter] {
-            FilterDialog editor(filter, &dialog);
+        connect(filterButton, &QPushButton::clicked, dialog, [dialog, filter] {
+            FilterDialog editor(*filter, dialog);
             if (editor.exec() == QDialog::Accepted)
-                filter = editor.options();
+                *filter = editor.options();
         });
         auto* previewButton = button(tr("扫描预览"));
-        connect(previewButton, &QPushButton::clicked, &dialog, [&dialog, model, &filter] {
+        connect(previewButton, &QPushButton::clicked, dialog, [dialog, model, filter] {
             std::vector<std::string> sources;
             for (const auto& source : model->roots())
                 sources.push_back(source.toUtf8().toStdString());
-            FilterOptions selected = filter;
+            FilterOptions selected = *filter;
             selected.sourceRules = model->rules();
             BackupPreview preview;
             std::string error;
             if (!ArchiveService::preview(sources, selected, preview, error, true)) {
-                QMessageBox::warning(&dialog, QObject::tr("预览失败"),
+                QMessageBox::warning(dialog, QObject::tr("预览失败"),
                                      QString::fromUtf8(error.c_str()));
                 return;
             }
-            QMessageBox::information(&dialog, QObject::tr("扫描预览"),
+            QMessageBox::information(dialog, QObject::tr("扫描预览"),
                                      previewDetails(preview, error));
         });
+        form->addRow(tr("运行"), modeRow);
         form->addRow(tr("名称"), name);
         form->addRow(tr("保存目录"), targetRow);
         form->addRow(options);
-        form->addRow(tr("运行"), modeRow);
         auto* cronRow = new QHBoxLayout;
         cronRow->addWidget(cron);
-        auto* cronHelp = new QLabel(tr("?"), &dialog);
+        auto* cronHelp = new QLabel(tr("?"), dialog);
         cronHelp->setObjectName("cronHelp");
         cronHelp->setToolTip(tr("五个字段：分钟 小时 日期 月份 星期。\n"
                                 "* 表示任意；支持逗号、范围和步长，例如 */15。\n"
@@ -603,17 +665,44 @@ QWidget* MainWindow::createSchedulePage() {
         body->addWidget(formWidget, 3);
         outer->addLayout(body, 1);
         auto* buttons =
-            new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+            new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, dialog);
         outer->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&, this] {
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::accepted, dialog, [this, dialog, job, isNew, filter, options, name, target, model, runModes, scheduled, realtime, cron, retention, refresh]() mutable {
+            if (!runModes->checkedButton()) {
+                QMessageBox::warning(dialog, tr("请选择运行方式"), tr("请选择定时或实时。"));
+                return;
+            }
+            if (!isNew) {
+                bool found = false;
+                for (const auto& current : jobs_->jobs()) {
+                    if (current.id != job.id)
+                        continue;
+                    job.enabled = current.enabled;
+                    job.lastRun = current.lastRun;
+                    job.lastSuccess = current.lastSuccess;
+                    job.nextRun = current.nextRun;
+                    job.lastResult = current.lastResult;
+                    job.realtimeStatus = current.realtimeStatus;
+                    job.realtimeTriggered = current.realtimeTriggered;
+                    job.fullRescan = current.fullRescan;
+                    job.changedPaths = current.changedPaths;
+                    found = true;
+                    break;
+                }
+                if (!found) {
+                    QMessageBox::warning(dialog, tr("无法保存计划"), tr("该计划已被删除。"));
+                    return;
+                }
+            }
             const auto pack = options->options();
             job.name = name->text();
             job.destination = target->text();
             job.sources = model->roots();
-            job.filter = filter;
+            job.filter = *filter;
             job.filter.sourceRules = model->rules();
             job.repository = options->incremental();
+            job.tarIncremental = options->tarIncremental();
             job.encrypted = options->encryptionEnabled();
             job.format = pack.format;
             job.compression = pack.compression;
@@ -631,13 +720,13 @@ QWidget* MainWindow::createSchedulePage() {
                 detail.clear();
                 if (!pack.password.empty()) {
                     if (!CredentialStore::save(key, pack.password, detail)) {
-                        QMessageBox::warning(&dialog, tr("凭据保存失败"),
+                        QMessageBox::warning(dialog, tr("凭据保存失败"),
                                              QString::fromStdString(detail));
                         return;
                     }
                     changed = true;
                 } else if (!hadOld) {
-                    QMessageBox::warning(&dialog, tr("需要密码"),
+                    QMessageBox::warning(dialog, tr("需要密码"),
                                          tr("请输入密码并确保密钥环可用。"));
                     return;
                 }
@@ -651,17 +740,16 @@ QWidget* MainWindow::createSchedulePage() {
                     if (!restored)
                         error += tr("\n凭据回滚失败：%1").arg(QString::fromStdString(rollback));
                 }
-                QMessageBox::warning(&dialog, tr("无法保存计划"), error);
+                QMessageBox::warning(dialog, tr("无法保存计划"), error);
                 return;
             }
-            dialog.accept();
+            dialog->accept();
             refresh();
         });
-        dialog.exec();
+        dialog->show();
     };
     connect(add, &QPushButton::clicked, this, [configure] {
         BackupJob job;
-        job.scheduled = false;
         configure(job, true);
     });
     connect(edit, &QPushButton::clicked, this, [selected, configure] {
@@ -702,57 +790,191 @@ QWidget* MainWindow::createSchedulePage() {
             appendLog(tr("无法删除计划凭据：%1").arg(QString::fromStdString(detail)), true);
         refresh();
     });
-    connect(cancelRun, &QPushButton::clicked, this, [this, selected] {
-        const auto job = selected();
-        if (planCancellations_.contains(job.id)) {
-            planCancellations_[job.id]->store(true);
-            appendLog(tr("正在取消计划：%1").arg(job.name));
-        }
-    });
     connect(details, &QPushButton::clicked, this, [this, selected] {
         const auto job = selected();
-        if (!job.id.isEmpty())
-            QMessageBox::information(this, tr("最近结果"),
-                                     job.lastResult.isEmpty() ? tr("尚未运行") : job.lastResult);
+        if (job.id.isEmpty() || busy_) return;
+        if (planDetails_) delete planDetails_.data();
+        auto* dialog = new QDialog(this);
+        dialog->setObjectName("planDetails");
+        planDetails_ = dialog;
+        dialog->setWindowTitle(tr("计划详情 · %1").arg(job.name));
+        dialog->resize(850, 560);
+        auto* layout = new QVBoxLayout(dialog);
+        layout->addWidget(createHistoryPage(job), 1);
+        dialog->show();
     });
     refresh();
     return page;
 }
 
-QWidget* MainWindow::createHistoryPage() {
+QWidget* MainWindow::createHistoryPage(const BackupJob& job) {
     QVBoxLayout* layout = nullptr;
-    QWidget* page = createPageShell(tr("备份快照 · 查看和恢复版本"), &layout);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* page = new QWidget;
+    layout = new QVBoxLayout(page);
+    layout->setContentsMargins(14, 6, 14, 6);
+    layout->setSpacing(5);
+    auto* heading = new QHBoxLayout;
+    auto* titleLabel = new QLabel(tr("历史版本"));
+    titleLabel->setObjectName("pageTitle");
+    heading->addWidget(titleLabel);
+    heading->addStretch();
     auto *path = new QLineEdit, *password = new QLineEdit;
+    auto* historyType = new QComboBox;
+    historyType->addItem(tr("版本仓库"));
+    historyType->addItem(tr("增量归档"));
+    historyType->addItem(tr("独立归档"));
+    historyType->setCurrentIndex(job.tarIncremental ? 1 : (job.repository ? 0 : 2));
+    path->setText(job.tarIncremental ? QDir(job.destination).filePath("dbackup-" + job.id + "-tar-incremental") : job.destination);
     path->setPlaceholderText(tr("仓库路径"));
-    password->setPlaceholderText(tr("仓库密码"));
+    password->setPlaceholderText(tr("输入恢复密码"));
+    password->setObjectName("planHistoryPassword");
     password->setEchoMode(QLineEdit::Password);
     password->setMaximumWidth(200);
-    auto *browse = button(tr("选择仓库…")), *load = button(tr("加载历史"), true);
+    auto* passwordLabel = new QLabel(tr("密码"));
+    passwordLabel->setObjectName("planHistoryPasswordLabel");
+    heading->addWidget(passwordLabel);
+    heading->addWidget(password);
+    layout->addLayout(heading);
+    scroll->setWidget(page);
+    if (job.encrypted) {
+        std::string secret, detail;
+        if (CredentialStore::load(("job/" + job.id).toStdString(), secret, detail))
+            password->setText(QString::fromUtf8(secret.c_str()));
+    }
+    auto *browse = button(tr("选择仓库…")), *load = button(tr("刷新"), true);
     auto* row = new QHBoxLayout;
+    row->addWidget(historyType);
     row->addWidget(path, 1);
     row->addWidget(browse);
-    row->addWidget(password);
     row->addWidget(load);
+    historyType->hide();
+    path->hide();
+    browse->hide();
+    load->hide();
     layout->addLayout(row);
+    auto* historyStatus = new QLabel;
+    historyStatus->setObjectName("planHistoryStatus");
+    historyStatus->setWordWrap(true);
+    historyStatus->setProperty("muted", true);
+    layout->addWidget(historyStatus);
     auto* table = new QTableWidget(0, 3);
-    table->setHorizontalHeaderLabels({tr("快照 ID"), tr("创建时间"), tr("状态")});
+    table->setAlternatingRowColors(true);
+    table->setObjectName("planHistoryTable");
+    load->setObjectName("loadPlanHistory");
+    auto* restore = button(tr("恢复所选快照"), true);
+    table->setHorizontalHeaderLabels({tr("快照 ID"), tr("创建时间"), tr("变更文件")});
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->horizontalHeader()->setStretchLastSection(true);
     layout->addWidget(table);
-    connect(browse, &QPushButton::clicked, this, [this, path] {
-        QString p = QFileDialog::getExistingDirectory(this, tr("选择仓库"));
+    connect(path, &QLineEdit::textChanged, table, [table] { table->setRowCount(0); });
+    const auto setHistoryEnabled = [historyType, path, password, browse, load, restore, table](bool enabled) {
+        for (auto* widget : {static_cast<QWidget*>(historyType), static_cast<QWidget*>(path),
+                             static_cast<QWidget*>(password), static_cast<QWidget*>(browse),
+                             static_cast<QWidget*>(load), static_cast<QWidget*>(restore),
+                             static_cast<QWidget*>(table)})
+            widget->setEnabled(enabled);
+    };
+    struct ChainTask {
+        std::atomic_bool cancelled{false};
+        bool ok = false;
+        std::string error;
+        std::vector<dbackup::incremental::VersionInfo> versions;
+    };
+    connect(browse, &QPushButton::clicked, this, [this, path, historyType] {
+        QString p = QFileDialog::getExistingDirectory(this, historyType->currentIndex() == 1
+                                                              ? tr("选择增量归档目录")
+                                                              : tr("选择仓库"));
         if (!p.isEmpty())
             path->setText(p);
     });
-    connect(load, &QPushButton::clicked, this, [this, path, password, table] {
+    connect(historyType, &QComboBox::currentIndexChanged, this, [table, path](int index) {
+        table->setRowCount(0);
+        path->setPlaceholderText(index == 1 ? QObject::tr("增量归档目录")
+                                            : QObject::tr("仓库路径"));
+    });
+    connect(load, &QPushButton::clicked, this, [this, path, password, table, historyType, setHistoryEnabled, job, historyStatus] {
+        if (!QFileInfo::exists(path->text())) {
+            table->setRowCount(0);
+            historyStatus->setText(tr("暂无备份记录。"));
+            return;
+        }
+        historyStatus->clear();
+        if (historyType->currentIndex() == 2) {
+            table->setRowCount(0);
+            const QString prefix = "dbackup-" + job.id + "-";
+            const QRegularExpression managed(QStringLiteral("^%1[0-9]{8}-[0-9]{6}-[0-9]{3}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.(tar|abk)$").arg(QRegularExpression::escape(prefix)));
+            for (const auto& file : QDir(path->text()).entryInfoList({prefix + "*.tar", prefix + "*.abk"}, QDir::Files | QDir::NoSymLinks, QDir::Time)) {
+                if (!managed.match(file.fileName()).hasMatch()) continue;
+                const int row = table->rowCount();
+                table->insertRow(row);
+                auto* item = new QTableWidgetItem(file.fileName());
+                item->setData(Qt::UserRole, file.absoluteFilePath());
+                table->setItem(row, 0, item);
+                table->setItem(row, 1, new QTableWidgetItem(file.lastModified().toString("yyyy-MM-dd HH:mm:ss")));
+                table->setItem(row, 2, new QTableWidgetItem(tr("变化分类不可用")));
+            }
+            return;
+        }
+        if (historyType->currentIndex() == 1) {
+            if (busy_)
+                return;
+            const auto directory = path->text().toUtf8().toStdString();
+            auto task = std::make_shared<ChainTask>();
+            auto connection = std::make_shared<QMetaObject::Connection>();
+            *connection = connect(cancelButton_, &QPushButton::clicked, this,
+                                  [task] { task->cancelled.store(true); });
+            cancelled_ = false;
+            setBusy(true, tr("正在读取备份历史…"));
+            setHistoryEnabled(false);
+            QThread* worker = QThread::create([task, directory] {
+                OperationContext context;
+                context.cancelled = &task->cancelled;
+                task->ok = dbackup::incremental::listPublicVersions(directory, context,
+                                                                    task->versions, task->error);
+            });
+            connect(worker, &QThread::finished, this, [this, table, task, connection, setHistoryEnabled, historyStatus] {
+                disconnect(*connection);
+                setHistoryEnabled(true);
+                setBusy(false);
+                if (!task->ok) {
+                    historyStatus->setText(tr("读取失败，请检查计划密码和备份目录。"));
+                    QMessageBox::warning(this, tr("读取失败"), QString::fromUtf8(task->error.c_str()));
+                    return;
+                }
+                table->setRowCount(0);
+                for (const auto& version : task->versions) {
+                    const int row = table->rowCount();
+                    table->insertRow(row);
+                    auto* id = new QTableWidgetItem(version.sequence
+                        ? QString::number(static_cast<qulonglong>(version.sequence))
+                        : QString::fromUtf8(version.directoryName.c_str()));
+                    id->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(version.sequence));
+                    id->setData(Qt::UserRole + 1, QString::fromUtf8(version.directoryName.c_str()));
+                    table->setItem(row, 0, id);
+                    table->setItem(row, 1, new QTableWidgetItem(
+                        version.createdAtMs ? QDateTime::fromMSecsSinceEpoch(version.createdAtMs).toString("yyyy-MM-dd HH:mm:ss")
+                                            : tr("—")));
+                    const QString changes = version.changesAvailable
+                        ? changeSummary(version.added, version.modified, version.deleted)
+                        : tr("旧备份没有公开变化摘要");
+                    auto* changeItem = new QTableWidgetItem(changes);
+                    changeItem->setToolTip(changes);
+                    table->setItem(row, 2, changeItem);
+                }
+            });
+            connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+            worker->start();
+            return;
+        }
         LocalRepository repo(path->text().toUtf8().toStdString());
         std::vector<SnapshotInfo> all;
         std::string error;
-        if (!password->text().isEmpty() && QFileInfo::exists(path->text() + "/config.bin") &&
-            !repo.initialize(password->text().toUtf8().toStdString(), error)) {
-            QMessageBox::warning(this, tr("读取失败"), QString::fromUtf8(error.c_str()));
-            return;
-        }
         if (!repo.listSnapshots(all, error)) {
+            historyStatus->setText(tr("读取失败，请检查计划密码和备份目录。"));
             QMessageBox::warning(this, tr("读取失败"), QString::fromUtf8(error.c_str()));
             return;
         }
@@ -765,29 +987,90 @@ QWidget* MainWindow::createHistoryPage() {
                 r, 1,
                 new QTableWidgetItem(
                     QDateTime::fromMSecsSinceEpoch(s.createdAtMs).toString("yyyy-MM-dd HH:mm:ss")));
-            auto* state = new QTableWidgetItem(s.partial ? tr("部分完成") : tr("完整"));
+            auto* state = new QTableWidgetItem(s.partial ? tr("部分完成，变化分类不可用") : tr("变化分类不可用"));
             if (!s.warnings.empty())
                 state->setToolTip(QString::fromUtf8(s.warnings.front().c_str()));
             table->setItem(r, 2, state);
         }
     });
-    auto* devices = createDeviceRestoreOption();
-    auto* restore = button(tr("恢复所选快照"), true);
+    QTimer::singleShot(0, page, [load] { load->click(); });
     auto* actions = new QHBoxLayout;
-    actions->addWidget(devices);
     actions->addStretch();
     actions->addWidget(restore);
     layout->addLayout(actions);
-    connect(restore, &QPushButton::clicked, this, [this, path, password, table, devices] {
+    connect(restore, &QPushButton::clicked, this, [this, path, password, table, historyType, setHistoryEnabled, job] {
         if (table->currentRow() < 0)
             return;
+        if (historyType->currentIndex() == 2) {
+            const QString archive = table->item(table->currentRow(), 0)->data(Qt::UserRole).toString();
+            const QString dest = QFileDialog::getExistingDirectory(this, tr("恢复到"));
+            if (dest.isEmpty()) return;
+            archivePath_->setText(archive);
+            restoreTarget_->setText(dest);
+            restorePassword_->setText(password->text());
+            startRestore();
+            return;
+        }
+        if (historyType->currentIndex() == 1) {
+            if (busy_)
+                return;
+            const QString parent = QFileDialog::getExistingDirectory(this, tr("选择恢复目录的上级目录"));
+            if (parent.isEmpty())
+                return;
+            bool accepted = false;
+            const QString name = QInputDialog::getText(this, tr("恢复到新目录"), tr("新目录名称"),
+                                                       QLineEdit::Normal, tr("DBackup-恢复"), &accepted).trimmed();
+            if (!accepted)
+                return;
+            if (name.isEmpty() || name == "." || name == ".." || name.contains('/') || name.contains('\\')) {
+                QMessageBox::warning(this, tr("目录名称无效"), tr("请输入不含路径分隔符的目录名称。"));
+                return;
+            }
+            const auto versionDirectory = table->item(table->currentRow(), 0)->data(Qt::UserRole + 1).toString().toUtf8().toStdString();
+            const QString dest = QDir(parent).filePath(name);
+            const auto directory = path->text().toUtf8().toStdString();
+            const auto secret = password->text().toUtf8().toStdString();
+            const auto target = dest.toUtf8().toStdString();
+            auto task = std::make_shared<ChainTask>();
+            auto connection = std::make_shared<QMetaObject::Connection>();
+            *connection = connect(cancelButton_, &QPushButton::clicked, this,
+                                  [task] { task->cancelled.store(true); });
+            cancelled_ = false;
+            setBusy(true, tr("正在恢复增量备份…"));
+            setHistoryEnabled(false);
+            QThread* worker = QThread::create([task, directory, secret, versionDirectory, target] {
+                OperationContext context;
+                context.cancelled = &task->cancelled;
+                std::vector<dbackup::incremental::VersionInfo> verified;
+                if (!dbackup::incremental::listVersions(directory, secret, context, verified, task->error)) return;
+                const auto item = std::find_if(verified.begin(), verified.end(), [&](const auto& v) {
+                    return v.directoryName == versionDirectory;
+                });
+                if (item == verified.end()) { task->error = "选中的备份版本已不存在"; return; }
+                task->ok = dbackup::incremental::restoreVersion(directory, item->sequence, secret,
+                                                                 target, context, task->error);
+            });
+            connect(worker, &QThread::finished, this, [this, task, dest, connection, setHistoryEnabled] {
+                disconnect(*connection);
+                setHistoryEnabled(true);
+                setBusy(false);
+                if (!task->ok)
+                    QMessageBox::critical(this, tr("恢复失败"), QString::fromUtf8(task->error.c_str()));
+                else if (!task->error.empty())
+                    QMessageBox::warning(this, tr("恢复完成（有提示）"), QString::fromUtf8(task->error.c_str()));
+                else
+                    QMessageBox::information(this, tr("恢复完成"), tr("备份已恢复到：\n%1").arg(dest));
+            });
+            connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+            worker->start();
+            return;
+        }
         QString dest = QFileDialog::getExistingDirectory(this, tr("恢复到"));
         if (dest.isEmpty())
             return;
         LocalRepository repo(path->text().toUtf8().toStdString());
         std::string error;
         OperationContext context;
-        context.allowDeviceNodes = devices->isChecked();
         bool ok = repo.restoreSnapshot(table->item(table->currentRow(), 0)->text().toStdString(),
                                        dest.toUtf8().toStdString(),
                                        password->text().toUtf8().toStdString(), error, context);
@@ -799,7 +1082,7 @@ QWidget* MainWindow::createHistoryPage() {
         else
             QMessageBox::information(this, tr("恢复完成"), tr("快照已恢复"));
     });
-    return page;
+    return scroll;
 }
 
 QWidget* MainWindow::createSettingsPage() {
@@ -1049,11 +1332,9 @@ void MainWindow::startRestore() {
     cancelled_ = false;
     setBusy(true, tr("正在恢复文件…"));
     appendLog(tr("开始从 %1 恢复").arg(archive));
-    const bool allowDevices = restoreDevices_->isChecked();
-    QThread* worker = QThread::create([this, archive, target, password, allowDevices] {
+    QThread* worker = QThread::create([this, archive, target, password] {
         OperationContext context;
         context.cancelled = &cancelled_;
-        context.allowDeviceNodes = allowDevices;
         context.onProgress = [this](const OperationProgress& p) {
             QMetaObject::invokeMethod(this, [this, p] { updateProgress(p); }, Qt::QueuedConnection);
         };

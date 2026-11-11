@@ -32,6 +32,8 @@ struct OperationContext {
     bool allowDeviceNodes = true;
     bool noReplace = false;
     bool includeSourceDirectory = false;
+    // Internal staged restores can report socket notices after the final commit.
+    bool suppressSocketNotice = false;
     std::vector<std::string>* warnings = nullptr;
 
     // 查询调用方是否请求取消当前操作。

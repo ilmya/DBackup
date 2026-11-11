@@ -15,7 +15,7 @@ struct BackupJob {
     QString id, name, destination, cron;
     QStringList sources;
     FilterOptions filter;
-    bool repository = true, encrypted = true;
+    bool repository = true, encrypted = true, tarIncremental = false;
     PackFormat format = PackFormat::Custom;
     Compression compression = Compression::Deflate;
     bool enabled = true, scheduled = true, realtime = false;

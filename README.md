@@ -1,66 +1,35 @@
 # DBackup
 
-DBackup 是 Linux 图形化备份工具，包含完整归档、本地增量仓库和自动任务。
+DBackup 是 Linux 图形化备份工具，支持完整归档、本地增量仓库、文件级增量归档，以及程序运行期间的定时和实时任务。完整归档和增量归档可选择自定义格式或 POSIX pax tar、压缩算法及可选的 AES-256-GCM；版本仓库按块去重。普通用户无法读取或恢复的项目会报告为部分完成。
 
-备份计划可保存来源、筛选和输出设置，手动或定时执行；版本仓库还支持实时监控。执行细节和跳过原因显示在活动日志中。
+## 环境与启动
 
-完整归档支持自定义格式或 POSIX pax tar，以及不压缩、Huffman、LZ77、DEFLATE 和可选 AES-256-GCM。纯 tar 可与系统 `tar` 互通；完成后显示的 MD5 仅用于摘要展示。增量仓库继续使用原有分块和 AES 加密。
-
-## 环境
-
-- Linux，C++17 编译器、CMake 3.21+、Ninja、Python 3。
-- Qt 6.5+，包含 Widgets。
-- OpenSSL、zlib、libsecret 开发库；桌面会话需要可用的 Secret Service 密钥环。
-- WSL 2 用户可通过 WSLg 在 Windows 桌面显示单独的应用窗口；程序访问的是 WSL 文件系统。
-
-Ubuntu 依赖示例：
+需要 Linux、C++17、CMake 3.21+、Ninja、Python 3、Qt 6.5+ Widgets、OpenSSL、zlib 和 libsecret。密码保存需要可用的 Secret Service 密钥环；WSL 用户可通过 WSLg 显示窗口。Ubuntu 依赖示例：
 
 ```bash
-sudo apt install build-essential cmake ninja-build pkg-config python3 libssl-dev zlib1g-dev libsecret-1-dev libgtest-dev fonts-noto-cjk dbus-x11 gnome-keyring
+sudo apt install build-essential cmake ninja-build pkg-config python3 libssl-dev zlib1g-dev libsecret-1-dev fonts-noto-cjk
+# 运行测试还需要：
+sudo apt install libgtest-dev dbus-x11 gnome-keyring
 ```
 
-另行安装包含上述模块的 Linux Qt 6.5 或更新版本。当前开发机的 Qt 路径为 `~/Qt/6.8.3/gcc_64`。
-
-自动化测试使用系统提供的 Google Test（Ubuntu 包 `libgtest-dev`）。仅构建产品时配置 `-DBUILD_TESTS=OFF` 无需该依赖。
-
-## 构建和运行
+Qt 需另装 Linux GCC 版本。`QT_ROOT` 默认是 `~/Qt/6.8.3/gcc_64`，可指定其他 Qt 前缀。`libgtest-dev` 仅为测试依赖。
 
 ```bash
-bash build.sh             # 增量构建并启动
+bash build.sh             # 构建并启动
+bash build.sh root        # 普通用户构建，以 root 启动
 bash build.sh build       # 仅构建
-bash build.sh test        # 单元、集成和支持工具的完整回归
-bash build.sh coverage    # 独立 GCC/gcov 行与分支覆盖率报告
-bash build.sh install
+bash build.sh test        # 完整自动测试，包含测试 CLI
+bash build.sh coverage    # 单元测试的 GCC/gcov 覆盖率
 bash build.sh help
 ```
 
-默认 Qt 路径为 `$HOME/Qt/6.8.3/gcc_64`；可通过 `QT_ROOT` 指定其他版本，通过 `DBACKUP_BUILD_DIR`、`DBACKUP_COVERAGE_BUILD_DIR`、`DBACKUP_INSTALL_PREFIX` 和 `DBACKUP_JOBS` 更改构建目录、覆盖率构建目录、安装目录和并行数。覆盖率报告写入独立构建目录，不设百分比门槛，也不代表功能正确性。安装默认使用 `~/.local`。目录权限、硬链接和实时监控的验证推荐在 Linux 原生文件系统中进行，而不是 `/mnt` 下的 Windows 挂载盘。
+常用环境变量为 `QT_ROOT`、`DBACKUP_BUILD_DIR`、`DBACKUP_COVERAGE_BUILD_DIR` 和 `DBACKUP_JOBS`。Linux 权限、特殊文件和实时监控建议在 WSL 原生文件系统验证，不要依赖 `/mnt` 挂载的 Windows 文件系统语义。
 
-详见 [用户指南](docs/user-guide.md)、[故障排查](docs/troubleshooting.md) 和 [开发说明](docs/wsl-linux-development.md)。
-# WSL 手工验收数据
+需要访问普通用户无权读取或恢复的文件时，可在终端运行 `bash build.sh root` 并按提示输入 sudo 密码。脚本以当前用户构建，并将当前图形会话变量传给 root 程序。root 模式使用独立的 root 配置和密钥环，创建的文件也可能归 root 所有；普通文件备份建议使用默认模式。root 会话不一定有可用的 Secret Service，使用需要保存密码的计划前应先确认密钥环可用。定时和实时任务仅在对应模式的程序运行期间执行。
 
-演示数据固定放在 WSL 原生文件系统的 /home/ilm/DBackup-Demo，只包含 filters/、large-data/、special-files/ 和 restore/ 四个目录，以及安全标记。它与 bash build.sh test 使用的自动化测试数据相互隔离；自动化测试文件保存在构建目录中。
+## 文档
 
-运行 `bash test.sh` 可使用默认的自定义归档、DEFLATE 和无加密配置，依次备份、恢复和比较三组数据。可用 `--format custom|tar`、`--compression none|huffman|lz77|deflate`、`--encrypt` 和 `--group filters|large-data|special-files` 指定配置。每次结果写入演示目录 `restore/` 下独立的新目录。测试使用 CLI 核心，并不代替 GUI 验收；归档按块处理，每个 CLI 进程默认限制为 3072 MiB，可用 `--memory-mib` 调整。
-
-脚本输出各组备份、恢复和总耗时，以及来源普通文件逻辑大小和生成的归档大小；组报告还保留同样的数据和逐项比较结果。来源大小逐路径统计，硬链接按多个路径计数；它与归档大小的差额并非纯压缩收益，也包含归档元数据开销。
-
-普通用户和提权模式使用相同的备份恢复流程；设备节点因权限不足而无法恢复时由程序跳过并报告。使用 `sudo bash test.sh` 独立进行提权验收。默认加密密码仅供测试，可通过 `DBACKUP_TEST_PASSWORD` 环境变量覆盖。普通模式的预期权限跳过会显示 PARTIAL 但返回 0；意外失败返回 1；提权模式有跳过时返回 2。先运行 `bash build.sh test` 构建测试 CLI。
-
-样例独立保存于 WSL，不由项目生成或重置；项目保留只读比较来源和恢复结果的工具。
-
-filters/ 按常见扩展名、路径、名称大小写、文件大小和固定修改时间组织样例；媒体和压缩格式文件是小型筛选占位文件，不保证能由相应软件打开。large-data/ 含 512 MiB 可压缩重复数据和 512 MiB 可复现伪随机数据，按块写入且不是稀疏文件。special-files/ 包含普通文件和目录、符号链接、硬链接、FIFO、路径型 Unix 套接字、不可读文件及可读邻居。套接字只保留节点，不包含服务或连接；抽象命名空间套接字没有文件路径，不在文件树样例范围内。
-
-在 GUI 中分别选择一个来源目录进行备份，并恢复到 restore/ 下独立目录，例如 restore/filters。完成后可以逐项比较：
-
-~~~bash
-bash tests/demo.sh compare filters /home/ilm/DBackup-Demo/restore/filters
-bash tests/demo.sh compare large-data /home/ilm/DBackup-Demo/restore/large-data
-bash tests/demo.sh compare special-files /home/ilm/DBackup-Demo/restore/special-files
-~~~
-
-比较检查路径、文件内容、类型、权限、属主、修改时间、链接目标及硬链接关系。不可读来源文件会以 SKIP 列出，不会被误报为通过。报告写入 out/build-test/demo-reports/（或 DBACKUP_BUILD_DIR/demo-reports/），不会在演示根目录增加额外内容。large-data 比较需要读取约 1 GiB 来源和恢复数据，耗时会更长。
-
-设备节点的创建和恢复需要相应权限；块设备样例只检查节点类型和设备号，不要打开该节点。所有特殊文件案例应在 WSL 原生 Linux 文件系统中验证。样例存在不代表 GUI 备份恢复已经通过。
-
-bash build.sh test 使用独立 D-Bus 会话和临时密钥环；验收夹具和工具自测数据默认在构建目录中。项目位于 WSL `/mnt` 挂载时，逐用例临时文件会放入自动清理的 `/tmp` 目录，以获得 Linux 权限、链接和 socket 语义；可用 `DBACKUP_TEST_DATA_ROOT`、`DBACKUP_TEST_TEMP_ROOT` 和 `DBACKUP_TEST_TMP_ROOT` 覆盖测试位置。
+- [用户指南](docs/user-guide.md)：备份、恢复、计划、特殊文件及故障排查。
+- [开发与测试指南](docs/development-guide.md)：模块、格式、安全、构建、测试和演示验收。
+- [独立验收用例](docs/acceptance-test-cases.md)：自动和人工场景及成功判据；部分案例仍需手工执行。
+- [验证记录](docs/verification.md)：已执行结果、演示报告和待完成的人工验收。
