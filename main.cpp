@@ -1,10 +1,11 @@
+// 图形备份程序的启动入口
 #include <QApplication>
 #include <QCoreApplication>
 
 #include "gui/main_window.h"
 #include "gui/theme.h"
 
-// 初始化 Qt 应用、主题和主窗口，并进入事件循环。
+// 初始化 Qt 应用、主题和主窗口，并进入事件循环
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);

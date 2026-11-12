@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 校验验收场景目录的数据结构和引用
 """Check that the acceptance matrix and its user steps stay traceable."""
 
 import json

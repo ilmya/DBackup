@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 生成并验证演示备份场景
 set -euo pipefail
 project="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 command_name="${1:-help}"

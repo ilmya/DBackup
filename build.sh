@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Linux 构建、测试、覆盖率和程序启动脚本
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 执行演示流程并核对备份与恢复结果
 """Run backup, restore and comparison against the existing WSL demo corpus."""
 import argparse
 import errno
@@ -227,8 +228,8 @@ def run(root, cli, options):
                     f'archive_bytes={archive.stat().st_size}' if archive.is_file() else 'archive_bytes=not_created',
                     f'elapsed={elapsed:.2f}s', f'archive={archive}', f'restored={restored}', f'outcome={outcome}']
         tool.write_report(run_dir / (group + '-report.md'), f'DBackup {group} 验收', 'bash test.sh', rows, evidence, outcome)
-        size_detail = (f'归档={archive.stat().st_size}字节' if archive.is_file()
-                       else '归档=未生成')
+        size_detail = (f'备份={archive.stat().st_size}字节' if archive.is_file()
+                       else '备份=未生成')
         restore_detail = f'{restore_seconds:.2f}秒' if restore_seconds is not None else '未执行'
         print(f'{GROUP_LABELS[group]}：{STATUS_LABELS[outcome]}，备份={backup_seconds:.2f}秒，恢复={restore_detail}，'
               f'总计={elapsed:.2f}秒，来源={source_bytes}字节，{size_detail}', flush=True)

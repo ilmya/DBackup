@@ -1,5 +1,6 @@
-#include "core/archive_internal.h"
-#include "core/backup_policy.h"
+// 验证Linux 文件扫描与筛选
+#include "core/archive/archive_internal.h"
+#include "core/selection/backup_policy.h"
 #include "test_support.h"
 #include <filesystem>
 #include <fstream>

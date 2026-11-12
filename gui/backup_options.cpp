@@ -1,3 +1,5 @@
+// 备份方式、格式、压缩和加密选项界面
+// 构造完整与增量备份选项，联动格式、压缩、加密、密码及实时计划的模式限制。
 #include "gui/backup_options.h"
 
 #include <QAbstractButton>
@@ -10,7 +12,7 @@
 #include <QRadioButton>
 
 namespace {
-// 按给定项目生成一组互斥单选项，并返回其布局容器。
+// 按给定项目生成一组互斥单选项，并返回其布局容器
 QWidget* choices(QButtonGroup* group, std::initializer_list<std::pair<QString, int>> items,
                  int selected, const char* prefix) {
     auto* container = new QWidget;
@@ -29,8 +31,9 @@ QWidget* choices(QButtonGroup* group, std::initializer_list<std::pair<QString, i
 }
 } // namespace
 
-BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) : QWidget(parent) {
-    allowRepository_ = allowRepository;
+// 创建各组选项并连接状态变化，普通备份页面可隐藏模式选择。
+BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowIncremental) : QWidget(parent) {
+    allowIncremental_ = allowIncremental;
     auto* grid = new QGridLayout(this);
     grid->setContentsMargins(0, 0, 0, 0);
     grid->setHorizontalSpacing(10);
@@ -39,10 +42,10 @@ BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) 
     format_ = new QButtonGroup(this);
     compression_ = new QButtonGroup(this);
     auto* modeLabel = new QLabel(tr("备份模式"));
-    auto* modeChoices = choices(mode_, {{tr("完整归档"), 0}, {tr("增量仓库"), 1},
-                                        {tr("增量归档"), 2}}, 0, "backupMode");
-    modeLabel->setVisible(allowRepository);
-    modeChoices->setVisible(allowRepository);
+    auto* modeChoices = choices(mode_, {{tr("完整备份"), 0}, {tr("增量备份"), 1}}, 0,
+                                "backupMode");
+    modeLabel->setVisible(allowIncremental);
+    modeChoices->setVisible(allowIncremental);
     grid->addWidget(modeLabel, 0, 0);
     grid->addWidget(modeChoices, 0, 1, 1, 3);
     grid->addWidget(new QLabel(tr("打包")), 1, 0);
@@ -58,8 +61,6 @@ BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) 
     encrypt_ = new QCheckBox(tr("加密"));
     encrypt_->setObjectName("encryptionEnabled");
     grid->addWidget(encrypt_, 3, 0);
-    repositoryEncryption_ = new QLabel(tr("加密"));
-    grid->addWidget(repositoryEncryption_, 3, 0);
     auto* algorithm = new QLabel(tr("AES-256-GCM"));
     grid->addWidget(algorithm, 3, 1);
     password_ = new QLineEdit;
@@ -69,10 +70,6 @@ BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) 
     grid->addWidget(password_, 3, 2);
     showPassword_ = new QCheckBox(tr("显示"));
     grid->addWidget(showPassword_, 3, 3);
-    repositoryHint_ = new QLabel(tr("增量仓库使用分块与 AES 加密"));
-    repositoryHint_->setObjectName("repositoryHint");
-    repositoryHint_->setProperty("muted", true);
-    grid->addWidget(repositoryHint_, 4, 1, 1, 3);
     connect(mode_, &QButtonGroup::idToggled, this, [this](int, bool) { updateEnabled(); });
     connect(format_, &QButtonGroup::idToggled, this, [this](int, bool) { updateEnabled(); });
     connect(compress_, &QCheckBox::toggled, this, [this] { updateEnabled(); });
@@ -83,18 +80,18 @@ BackupOptionsWidget::BackupOptionsWidget(QWidget* parent, bool allowRepository) 
     updateEnabled();
 }
 
+// 返回计划当前是否选择增量备份。
 bool BackupOptionsWidget::incremental() const {
     return mode_->checkedId() == 1;
 }
-bool BackupOptionsWidget::tarIncremental() const {
-    return mode_->checkedId() == 2;
-}
+// 返回用户是否启用密码加密。
 bool BackupOptionsWidget::encryptionEnabled() const {
-    return incremental() || encrypt_->isChecked();
+    return encrypt_->isChecked();
 }
 
-void BackupOptionsWidget::setRepositoryRequired(bool required) {
-    if (required == repositoryRequired_ || !allowRepository_)
+// 实时计划启用时强制增量模式，解除限制后恢复原先选择。
+void BackupOptionsWidget::setIncrementalRequired(bool required) {
+    if (required == incrementalRequired_ || !allowIncremental_)
         return;
     if (required) {
         previousMode_ = mode_->checkedId();
@@ -102,14 +99,15 @@ void BackupOptionsWidget::setRepositoryRequired(bool required) {
             mode_->button(1)->setChecked(true);
     }
     mode_->button(0)->setEnabled(!required);
-    repositoryRequired_ = required;
+    incrementalRequired_ = required;
     if (!required)
         mode_->button(previousMode_)->setChecked(true);
 }
 
-void BackupOptionsWidget::setOptions(bool repository, bool encrypted, PackFormat format,
-                                     Compression compression, bool tarIncremental) {
-    if (auto* b = mode_->button(allowRepository_ ? (tarIncremental ? 2 : (repository ? 1 : 0)) : 0))
+// 根据已保存计划恢复备份模式、格式、压缩及加密设置。
+void BackupOptionsWidget::setOptions(bool incremental, bool encrypted, PackFormat format,
+                                     Compression compression) {
+    if (auto* b = mode_->button(allowIncremental_ && incremental ? 1 : 0))
         b->setChecked(true);
     if (auto* b = format_->button(static_cast<int>(format)))
         b->setChecked(true);
@@ -120,6 +118,7 @@ void BackupOptionsWidget::setOptions(bool repository, bool encrypted, PackFormat
     updateEnabled();
 }
 
+// 汇总当前打包选项，仅在启用加密时读取密码。
 PackOptions BackupOptionsWidget::options() const {
     PackOptions result;
     result.format = static_cast<PackFormat>(format_->checkedId());
@@ -131,19 +130,18 @@ PackOptions BackupOptionsWidget::options() const {
     return result;
 }
 
+// 将密钥环中读取的密码填入密码输入框。
 void BackupOptionsWidget::setPassword(const QString& password) {
     password_->setText(password);
 }
 
+// 根据压缩和加密开关更新算法选择与密码输入状态。
 void BackupOptionsWidget::updateEnabled() {
-    const bool repository = incremental();
-    formatChoices_->setEnabled(!repository);
-    compress_->setEnabled(!repository);
-    compressionChoices_->setEnabled(!repository && compress_->isChecked());
-    encrypt_->setEnabled(!repository);
-    encrypt_->setVisible(!repository);
-    repositoryEncryption_->setVisible(repository);
+    formatChoices_->setEnabled(true);
+    compress_->setEnabled(true);
+    compressionChoices_->setEnabled(compress_->isChecked());
+    encrypt_->setEnabled(true);
+    encrypt_->setVisible(true);
     password_->setEnabled(encryptionEnabled());
     showPassword_->setEnabled(encryptionEnabled());
-    repositoryHint_->setVisible(repository);
 }

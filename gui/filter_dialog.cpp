@@ -1,3 +1,5 @@
+// 备份筛选条件编辑界面
+// 构造路径、类型、名称、大小、时间和所有者筛选输入，并将界面内容转换为筛选配置。
 #include "gui/filter_dialog.h"
 
 #include <QCheckBox>
@@ -20,14 +22,14 @@
 #include <QVBoxLayout>
 
 namespace {
-// 返回筛选尺寸单位对应的二进制倍数。
+// 返回筛选尺寸单位对应的二进制倍数
 uint64_t unitMultiplier(int index) {
     static constexpr uint64_t values[] = {1ULL, 1024ULL, 1024ULL * 1024ULL,
                                           1024ULL * 1024ULL * 1024ULL};
     return values[index < 0 || index > 3 ? 0 : index];
 }
 
-// 将字节数量拆成数值与最合适的显示单位。
+// 将字节数量拆成数值与最合适的显示单位
 void setSizeValue(uint64_t bytes, QSpinBox* value, QComboBox* unit) {
     int selected = 0;
     while (selected < 3 && bytes > 0 && bytes % 1024 == 0) {
@@ -38,7 +40,7 @@ void setSizeValue(uint64_t bytes, QSpinBox* value, QComboBox* unit) {
     unit->setCurrentIndex(selected);
 }
 
-// 收集多行规则输入并去掉空行和首尾空白。
+// 收集多行规则输入并去掉空行和首尾空白
 QStringList ruleLines(const QPlainTextEdit* edit) {
     QStringList result;
     for (const QString& line : edit->toPlainText().split('\n')) {
@@ -50,6 +52,7 @@ QStringList ruleLines(const QPlainTextEdit* edit) {
 }
 } // namespace
 
+// 按已有筛选配置初始化表单和预设，并连接确认、取消及重置操作。
 FilterDialog::FilterDialog(const FilterOptions& options, QWidget* parent) : QDialog(parent) {
     setObjectName("filterDialog");
     setWindowTitle(tr("筛选规则"));
@@ -241,6 +244,7 @@ FilterDialog::FilterDialog(const FilterOptions& options, QWidget* parent) : QDia
     root->addWidget(buttons);
 }
 
+// 将所选文件类别预设展开为扩展名列表。
 void FilterDialog::applyTypePreset(int index) {
     static const QStringList values = {"",
                                        ".doc,.docx,.pdf,.txt,.md,.xls,.xlsx,.ppt,.pptx",
@@ -253,6 +257,7 @@ void FilterDialog::applyTypePreset(int index) {
         extensionsEdit_->setText(values[index]);
 }
 
+// 读取筛选表单，组装路径、类型、大小、时间和所有者规则。
 FilterOptions FilterDialog::options() const {
     FilterOptions result;
     result.pathContains = pathEdit_->text().trimmed().toUtf8().toStdString();

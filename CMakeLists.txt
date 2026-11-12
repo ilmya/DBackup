@@ -1,3 +1,4 @@
+# 配置项目构建目标、依赖和测试
 cmake_minimum_required(VERSION 3.21)
 project(DBackup VERSION 1.0.0 LANGUAGES CXX)
 
@@ -19,8 +20,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SECRET REQUIRED IMPORTED_TARGET libsecret-1)
 
 add_library(dbackup_core STATIC
-    core/archive.cpp core/archive_scan.cpp core/archive_format.cpp core/archive_restore.cpp core/filter_parser.cpp core/archive_pipeline.cpp core/archive_blocks.cpp core/archive_custom_stream.cpp core/archive_tar.cpp core/backup_policy.cpp core/compression.cpp core/md5.cpp core/crypto.cpp core/linux_file.cpp core/repository.cpp
-    automation/cron.cpp automation/directory_watcher.cpp core/credential_store.cpp core/incremental_diff.cpp core/incremental_scan.cpp core/incremental_manifest.cpp core/incremental_verify.cpp core/incremental_chain.cpp)
+    core/archive/archive.cpp core/archive/archive_scan.cpp core/archive/archive_format.cpp core/archive/archive_restore.cpp core/selection/filter_parser.cpp core/archive/archive_pipeline.cpp core/archive/archive_blocks.cpp core/archive/archive_custom_stream.cpp core/archive/archive_tar.cpp core/selection/backup_policy.cpp core/compression/compression.cpp core/security/md5.cpp core/security/crypto.cpp core/filesystem/linux_file.cpp
+    automation/schedule/cron.cpp automation/realtime/directory_watcher.cpp core/security/credential_store.cpp core/incremental/incremental_diff.cpp core/incremental/incremental_scan.cpp core/incremental/incremental_manifest.cpp core/incremental/incremental_verify.cpp core/incremental/incremental_chain.cpp)
 target_include_directories(dbackup_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dbackup_core PUBLIC ZLIB::ZLIB OpenSSL::Crypto Threads::Threads PkgConfig::SECRET)
 

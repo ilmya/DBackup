@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 验证演示数据与恢复结果的比较
 """Verify that demonstration comparisons catch special-type and link differences."""
 import os
 from pathlib import Path

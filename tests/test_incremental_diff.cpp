@@ -1,8 +1,9 @@
-#include "core/incremental_diff.h"
-#include "core/incremental_scan.h"
-#include "core/incremental_manifest.h"
-#include "core/incremental_archive.h"
-#include "core/incremental_chain.h"
+// 验证增量扫描、清单、备份和版本链
+#include "core/incremental/incremental_diff.h"
+#include "core/incremental/incremental_scan.h"
+#include "core/incremental/incremental_manifest.h"
+#include "core/incremental/incremental_archive.h"
+#include "core/incremental/incremental_chain.h"
 #include "test_support.h"
 #include <algorithm>
 #include <filesystem>
@@ -493,7 +494,7 @@ TEST(IncrementalChain, RestoresCustomAndTarVersionsInSameChain) {
         std::filesystem::rename(firstDir, chain / "v00000000000000000001");
         const auto firstArchive = chain / "v00000000000000000001" / "archive.abk";
         ASSERT_TRUE(std::filesystem::exists(firstArchive));
-        // Existing chains used an extensionless name; preserve their readability.
+        // Existing chains used an extensionless name; preserve their readability
         std::filesystem::rename(firstArchive, firstArchive.parent_path() / "archive");
         std::filesystem::remove(source / "removed");
         std::ofstream(source / "kept") << "two";

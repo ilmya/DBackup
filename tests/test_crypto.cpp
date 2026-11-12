@@ -1,6 +1,7 @@
-// Copyright 2026 BackupTool Team. All rights reserved.
+// 验证摘要、加密和密钥派生
+// Copyright 2026 BackupTool Team. All rights reserved
 
-#include "core/crypto.h"
+#include "core/security/crypto.h"
 
 #include <gtest/gtest.h>
 

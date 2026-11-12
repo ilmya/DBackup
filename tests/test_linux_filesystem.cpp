@@ -1,7 +1,7 @@
-#include "core/archive.h"
-#include "core/archive_internal.h"
-#include "core/linux_file.h"
-#include "core/repository.h"
+// 验证Linux 文件权限、链接及特殊文件
+#include "core/archive/archive.h"
+#include "core/archive/archive_internal.h"
+#include "core/filesystem/linux_file.h"
 #include "test_support.h"
 
 #include <gtest/gtest.h>
@@ -166,7 +166,7 @@ TEST(LinuxFile, MetadataPreservesModeAndTime) {
     EXPECT_EQ(restored.gid, original.gid);
 }
 
-TEST(SpecialFiles, SocketRoundTripsInBothArchivesAndSnapshot) {
+TEST(SpecialFiles, SocketRoundTripsInBothBackupFormats) {
     test_support::TemporaryDirectory temporary("dbackup-case");
     const std::string root = temporary.string();
     const fs::path base(root), source = base / "source";
@@ -228,24 +228,11 @@ TEST(SpecialFiles, SocketRoundTripsInBothArchivesAndSnapshot) {
               0);
     close(client);
     close(active);
-    LocalRepository repo((base / "repo").string());
-    SnapshotOptions options;
-    options.sources = {source.string()};
-    options.password = "test-only";
-    SnapshotInfo snapshot;
-    std::string error;
-    ASSERT_TRUE(repo.createSnapshot(options, snapshot, error)) << error;
-    ASSERT_TRUE(
-        repo.restoreSnapshot(snapshot.id, (base / "snapshot").string(), options.password, error))
-        << error;
-    struct stat info {};
-    ASSERT_EQ(lstat((base / "snapshot/source/socket").c_str(), &info), 0);
-    EXPECT_TRUE(S_ISSOCK(info.st_mode));
     EXPECT_EQ(listen(fd, 1), 0);
     close(fd);
 }
 
-TEST(SpecialFiles, UnreadableSourceCreatesPartialSnapshotWithoutLosingReadableFiles) {
+TEST(SpecialFiles, UnreadableSourceIsReportedWithoutLosingReadableFiles) {
     if (geteuid() == 0)
         GTEST_SKIP() << "需要非 root 用户";
     test_support::TemporaryDirectory temporary("dbackup-case");
@@ -254,14 +241,7 @@ TEST(SpecialFiles, UnreadableSourceCreatesPartialSnapshotWithoutLosingReadableFi
     fs::create_directory(source);
     std::ofstream(source / "readable") << "keep";
     std::ofstream(source / "private") << "secret";
-    LocalRepository repo((base / "repo").string());
-    SnapshotOptions options;
-    options.sources = {source.string()};
-    options.password = "test-only";
-    SnapshotInfo complete;
     std::string error;
-    ASSERT_TRUE(repo.createSnapshot(options, complete, error)) << error;
-    EXPECT_FALSE(complete.partial);
     ASSERT_EQ(chmod((source / "private").c_str(), 0), 0);
     PackOptions pack;
     ASSERT_TRUE(
@@ -273,21 +253,5 @@ TEST(SpecialFiles, UnreadableSourceCreatesPartialSnapshotWithoutLosingReadableFi
         << error;
     EXPECT_TRUE(fs::exists(base / "output/readable"));
     EXPECT_FALSE(fs::exists(base / "output/private"));
-    SnapshotInfo snapshot;
-    ASSERT_TRUE(repo.createSnapshot(options, snapshot, error)) << error;
-    EXPECT_TRUE(snapshot.partial);
-    ASSERT_FALSE(snapshot.warnings.empty());
-    std::vector<SnapshotInfo> listed;
-    ASSERT_TRUE(repo.listSnapshots(listed, error)) << error;
-    ASSERT_EQ(listed.size(), 2u);
-    EXPECT_TRUE(listed[0].partial);
-    EXPECT_FALSE(listed[0].warnings.empty());
-    EXPECT_EQ(listed[1].id, complete.id);
-    EXPECT_FALSE(listed[1].partial);
-    ASSERT_TRUE(
-        repo.restoreSnapshot(snapshot.id, (base / "restored").string(), options.password, error))
-        << error;
-    EXPECT_TRUE(fs::exists(base / "restored/source/readable"));
-    EXPECT_FALSE(fs::exists(base / "restored/source/private"));
     chmod((source / "private").c_str(), 0600);
 }

@@ -1,5 +1,7 @@
+// 备份来源树及文件选择规则
+// 基于文件系统模型显示来源树，处理父子路径勾选状态并输出实际来源和包含排除规则。
 #include "gui/source_tree.h"
-#include "core/backup_policy.h"
+#include "core/selection/backup_policy.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -7,7 +9,7 @@
 #include <memory>
 
 namespace {
-// 将字节数缩写为适合目录树窄列显示的单位。
+// 将字节数缩写为适合目录树窄列显示的单位
 QString compactSize(qint64 bytes) {
     static const char* units[] = {"B", "K", "M", "G", "T"};
     double value = static_cast<double>(qMax<qint64>(0, bytes));
@@ -22,6 +24,7 @@ QString compactSize(qint64 bytes) {
 }
 } // namespace
 
+// 初始化只读文件树，显示隐藏项并避免解析符号链接。
 SourceTreeModel::SourceTreeModel(QObject* parent) : QFileSystemModel(parent) {
     setReadOnly(true);
     setOption(QFileSystemModel::DontResolveSymlinks, true);
@@ -29,6 +32,7 @@ SourceTreeModel::SourceTreeModel(QObject* parent) : QFileSystemModel(parent) {
     setRootPath("/");
 }
 
+// 为名称、大小和日期列提供中文表头。
 QVariant SourceTreeModel::headerData(int section, Qt::Orientation orientation, int role) const {
     if (orientation == Qt::Horizontal && role == Qt::DisplayRole) {
         switch (section) {
@@ -43,11 +47,13 @@ QVariant SourceTreeModel::headerData(int section, Qt::Orientation orientation, i
     return QFileSystemModel::headerData(section, orientation, role);
 }
 
+// 依据路径规则判断指定来源是否被选中。
 bool SourceTreeModel::selected(const QString& path, bool includeSelf) const {
     return dbackup::backup_policy::sourcePathSelected(
         std::filesystem::path(path.toUtf8().toStdString()), rules(), includeSelf, false);
 }
 
+// 返回文件显示信息及完整、部分或未选中的复选状态。
 QVariant SourceTreeModel::data(const QModelIndex& index, int role) const {
     if (index.isValid() && (index.column() == 1 || index.column() == 3) &&
         (role == Qt::DisplayRole || role == Qt::ToolTipRole)) {
@@ -71,11 +77,13 @@ QVariant SourceTreeModel::data(const QModelIndex& index, int role) const {
     return current ? Qt::Checked : Qt::Unchecked;
 }
 
+// 只允许在名称列通过复选框修改来源选择。
 Qt::ItemFlags SourceTreeModel::flags(const QModelIndex& index) const {
     auto result = QFileSystemModel::flags(index);
     return index.isValid() && index.column() == 0 ? result | Qt::ItemIsUserCheckable : result;
 }
 
+// 更新路径选择规则并通知视图刷新父子节点状态。
 bool SourceTreeModel::setData(const QModelIndex& index, const QVariant& value, int role) {
     if (role != Qt::CheckStateRole || !index.isValid() || index.column() != 0)
         return false;
@@ -90,6 +98,7 @@ bool SourceTreeModel::setData(const QModelIndex& index, const QVariant& value, i
     return true;
 }
 
+// 导出当前路径的包含和排除规则。
 std::vector<SourceSelectionRule> SourceTreeModel::rules() const {
     std::vector<SourceSelectionRule> result;
     for (auto it = rules_.cbegin(); it != rules_.cend(); ++it)
@@ -97,6 +106,7 @@ std::vector<SourceSelectionRule> SourceTreeModel::rules() const {
     return result;
 }
 
+// 恢复保存的来源规则并刷新树视图。
 void SourceTreeModel::setRules(const std::vector<SourceSelectionRule>& rules) {
     rules_.clear();
     for (const auto& rule : rules)
@@ -104,6 +114,7 @@ void SourceTreeModel::setRules(const std::vector<SourceSelectionRule>& rules) {
     emit layoutChanged();
 }
 
+// 从选择规则中计算需要扫描的来源根路径。
 QStringList SourceTreeModel::roots() const {
     QStringList result;
     for (const auto& root : dbackup::backup_policy::selectedSourceRoots(rules()))
@@ -111,6 +122,7 @@ QStringList SourceTreeModel::roots() const {
     return result;
 }
 
+// 创建来源树视图并展开当前用户主目录。
 QTreeView* createSourceTree(SourceTreeModel* model, QWidget* parent) {
     auto* tree = new QTreeView(parent);
     tree->setModel(model);

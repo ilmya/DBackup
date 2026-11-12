@@ -1,22 +1,24 @@
+// 按计划执行备份并处理版本保留
+// 根据计划类型调用完整备份或增量版本链，仅在成功提交后执行对应的历史保留策略。
 #pragma once
 
 #include "automation/job_manager.h"
-#include "core/repository.h"
-#include "core/incremental_chain.h"
+#include "core/incremental/incremental_chain.h"
 #include <QDir>
 #include <QFile>
 #include <QRegularExpression>
 #include <QUuid>
 
+// 记录计划执行是否成功、是否部分完成，以及增量版本的文件变化。
 struct PlanResult {
     bool success = false;
     bool partial = false;
-    std::string detail;
-    bool changesAvailable = false;
+    std::string detail; // 成功时为结果路径，失败或部分完成时为诊断信息
+    bool changesAvailable = false; // 只有增量版本提供可信的本次文件变化集合
     std::vector<std::string> added, modified, deleted;
 };
 
-// 按计划执行仓库快照或独立归档，并仅在完整成功时执行保留清理。
+// 按计划执行完整或增量备份，并仅在完整成功时执行保留清理
 inline PlanResult executePlan(const BackupJob& job, const std::string& password,
                               OperationContext context = {}) {
     context.includeSourceDirectory = true;
@@ -56,24 +58,6 @@ inline PlanResult executePlan(const BackupJob& job, const std::string& password,
         result.detail = chain.toUtf8().toStdString();
         return result;
     }
-    if (job.repository) {
-        SnapshotOptions options;
-        options.sources = sources;
-        options.password = password;
-        options.filter = job.filter;
-        LocalRepository repository(job.destination.toUtf8().toStdString());
-        SnapshotInfo snapshot;
-        result.success = repository.createSnapshot(options, snapshot, result.detail, context);
-        result.partial = snapshot.partial;
-        if (result.success && context.isCancelled()) {
-            result.success = false;
-            result.detail = "操作已取消；已提交的快照保留，未清理旧快照";
-            return result;
-        }
-        if (result.success && !result.partial)
-            result.success = repository.prune(job.retention, result.detail);
-        return result;
-    }
     context.noReplace = true;
     const bool tar =
         job.format == PackFormat::Tar && job.compression == Compression::None && !job.encrypted;
@@ -92,7 +76,7 @@ inline PlanResult executePlan(const BackupJob& job, const std::string& password,
     result.partial = result.success && !result.detail.empty();
     if (result.success && context.isCancelled()) {
         result.success = false;
-        result.detail = "操作已取消；已提交的归档保留，未清理旧归档";
+        result.detail = "操作已取消；已提交的备份保留，未清理旧备份";
         return result;
     }
     if (result.success && !result.partial) {
@@ -113,7 +97,7 @@ inline PlanResult executePlan(const BackupJob& job, const std::string& password,
                 continue;
             if (!QFile::remove(file.absoluteFilePath())) {
                 result.detail =
-                    "无法删除计划的旧归档: " + file.absoluteFilePath().toUtf8().toStdString();
+                    "无法删除计划的旧备份: " + file.absoluteFilePath().toUtf8().toStdString();
                 result.success = false;
                 break;
             }

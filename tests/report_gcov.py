@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 汇总并报告 gcov 测试覆盖率
 """Create a GCC gcov line/branch summary for production code under test."""
 
 from __future__ import annotations
@@ -14,18 +15,17 @@ import sys
 
 PROJECT = Path(__file__).resolve().parents[1]
 CORE_SOURCES = (
-    "core/archive.cpp",
-    "core/archive_pipeline.cpp",
-    "core/archive_tar.cpp",
-    "core/backup_policy.cpp",
-    "core/compression.cpp",
-    "core/md5.cpp",
-    "core/crypto.cpp",
-    "core/linux_file.cpp",
-    "core/repository.cpp",
-    "core/credential_store.cpp",
-    "automation/cron.cpp",
-    "automation/directory_watcher.cpp",
+    "core/archive/archive.cpp",
+    "core/archive/archive_pipeline.cpp",
+    "core/archive/archive_tar.cpp",
+    "core/selection/backup_policy.cpp",
+    "core/compression/compression.cpp",
+    "core/security/md5.cpp",
+    "core/security/crypto.cpp",
+    "core/filesystem/linux_file.cpp",
+    "core/security/credential_store.cpp",
+    "automation/schedule/cron.cpp",
+    "automation/realtime/directory_watcher.cpp",
 )
 AUTOMATION_TEST_SOURCES = (
     "automation/job_manager.cpp",

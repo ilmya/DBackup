@@ -1,4 +1,5 @@
-// Copyright 2026 BackupTool Team. All rights reserved.
+// 验证备份创建、读取、恢复与异常处理
+// Copyright 2026 BackupTool Team. All rights reserved
 
 /**
  * test_archive.cpp — archive 模块的 Google Test 单元测试
@@ -12,7 +13,7 @@
  *   6. 二进制格式头部校验（Magic 验证）
  */
 
-#include "core/archive.h"
+#include "core/archive/archive.h"
 #include "test_support.h"
 #include <gtest/gtest.h>
 
@@ -235,7 +236,7 @@ TEST_F(ArchiveServiceTest, MultipleFilesAndDirectories) {
     // 打包
     ASSERT_TRUE(ArchiveService::create(srcDir, abkFile, error)) << error;
 
-    // 读取归档验证条目数
+    // 读取备份验证条目数
     std::vector<ArchiveEntry> entries;
     ASSERT_TRUE(ArchiveService::inspect(abkFile, entries, error)) << error;
     // 应有: subdir(目录), subdir/deep(目录), file1.txt, subdir/file2.txt, subdir/deep/file3.txt
@@ -294,7 +295,7 @@ TEST_F(ArchiveServiceTest, UnpackNonexistentFile) {
     EXPECT_FALSE(error.empty());
 }
 
-/** New archives use the chunked envelope, including the convenience API. */
+/** New archives use the chunked envelope, including the convenience API */
 TEST_F(ArchiveServiceTest, ArchiveHeaderFormat) {
     WriteFile(srcDir + "/test.txt", "header test");
     std::string error;
@@ -358,7 +359,7 @@ TEST_F(ArchiveServiceTest, EmptyFileRoundTrip) {
     ASSERT_EQ(ReadFile(dstDir + "/empty.txt"), "");
 }
 
-/** Sprint 2: zlib compression + AES-256 password protection. */
+/** Sprint 2: zlib compression + AES-256 password protection */
 TEST_F(ArchiveServiceTest, CompressedEncryptedRoundTrip) {
     std::string error;
     std::string content(256 * 1024, 'A');
@@ -380,7 +381,7 @@ TEST_F(ArchiveServiceTest, CompressedEncryptedRoundTrip) {
     EXPECT_EQ(ReadFile(dstDir + "/repetitive.txt"), content);
 }
 
-/** Sprint 2: path/extension/size filters only include matching files. */
+/** Sprint 2: path/extension/size filters only include matching files */
 TEST_F(ArchiveServiceTest, FilterByExtensionAndSize) {
     std::string error;
     WriteFile(srcDir + "/keep.txt", "keep me");
@@ -411,7 +412,7 @@ TEST_F(ArchiveServiceTest, DirectoryMtimeRestoredAfterChildren) {
     EXPECT_EQ(value.st_mtim.tv_nsec, 123456789);
 }
 
-/** Sprint 2: filter expressions reject invalid values instead of silently ignoring them. */
+/** Sprint 2: filter expressions reject invalid values instead of silently ignoring them */
 TEST(FilterOptionsTest, StrictValidation) {
     FilterOptions filter;
     std::string error;
@@ -479,7 +480,7 @@ TEST_F(ArchiveServiceTest, MultipleSourceDirectoryTimesRoundTrip) {
     }
 }
 
-/** Linux file permissions are preserved by the current-format round trip. */
+/** Linux file permissions are preserved by the current-format round trip */
 TEST_F(ArchiveServiceTest, FileAttributesRestoration) {
     WriteFile(srcDir + "/readonly.txt", "attributes");
     ASSERT_EQ(chmod((srcDir + "/readonly.txt").c_str(), 0440), 0);
@@ -491,7 +492,7 @@ TEST_F(ArchiveServiceTest, FileAttributesRestoration) {
     EXPECT_EQ(info.st_mode & 0777, 0440);
 }
 
-/** Corruption of an unencrypted current-format archive is detected by SHA-256. */
+/** Corruption of an unencrypted current-format archive is detected by SHA-256 */
 TEST_F(ArchiveServiceTest, DetectsArchiveTampering) {
     std::string error;
     WriteFile(srcDir + "/data.txt", std::string(4096, 'A'));
@@ -514,7 +515,7 @@ TEST_F(ArchiveServiceTest, DetectsArchiveTampering) {
     EXPECT_NE(error.find("校验失败"), std::string::npos);
 }
 
-/** Sprint 1/2: replacing an existing archive still produces a valid final file. */
+/** Sprint 1/2: replacing an existing archive still produces a valid final file */
 TEST_F(ArchiveServiceTest, NoReplacePreservesExistingArchive) {
     WriteFile(srcDir + "/new.txt", "new data");
     WriteFile(abkFile, "existing data");
@@ -541,7 +542,7 @@ TEST_F(ArchiveServiceTest, AtomicallyReplacesExistingArchive) {
     EXPECT_EQ(entries[0].data, "new data");
 }
 
-/** The destination archive is excluded when it is saved inside the source directory. */
+/** The destination archive is excluded when it is saved inside the source directory */
 TEST_F(ArchiveServiceTest, ExcludesDestinationArchiveFromSource) {
     std::string error;
     WriteFile(srcDir + "/data.txt", "data");
@@ -557,7 +558,7 @@ TEST_F(ArchiveServiceTest, ExcludesDestinationArchiveFromSource) {
     EXPECT_EQ(entries[0].relativePath, "data.txt");
 }
 
-/** A single file can be selected as the complete backup source. */
+/** A single file can be selected as the complete backup source */
 TEST_F(ArchiveServiceTest, SingleFileAsBackupSource) {
     std::string error;
     const std::string sourceFile = srcDir + "/selected.txt";
@@ -575,7 +576,7 @@ TEST_F(ArchiveServiceTest, SingleFileAsBackupSource) {
     EXPECT_EQ(ReadFile(dstDir + "/selected.txt"), "selected file only");
 }
 
-/** The source file and output archive must not be the same path. */
+/** The source file and output archive must not be the same path */
 TEST_F(ArchiveServiceTest, RejectsSourceEqualToDestination) {
     std::string error;
     const std::string sourceFile = srcDir + "/same.abk";
@@ -587,7 +588,7 @@ TEST_F(ArchiveServiceTest, RejectsSourceEqualToDestination) {
     EXPECT_EQ(ReadFile(sourceFile), "do not overwrite");
 }
 
-/** Multiple files and folders can be combined into one archive. */
+/** Multiple files and folders can be combined into one archive */
 TEST_F(ArchiveServiceTest, MultipleBackupSources) {
     std::string error;
     const std::string first = srcDir + "/first.txt";
@@ -611,7 +612,7 @@ TEST_F(ArchiveServiceTest, MultipleBackupSources) {
     EXPECT_EQ(ReadFile(dstDir + "/folder/nested.txt"), "nested");
 }
 
-/** Path, type, name, time, size and owner filters work together. */
+/** Path, type, name, time, size and owner filters work together */
 TEST_F(ArchiveServiceTest, FilterAcrossAllSixCategories) {
     std::string error;
     WriteFile(srcDir + "/docs/report.txt", "filter target");
@@ -644,7 +645,7 @@ TEST_F(ArchiveServiceTest, FilterAcrossAllSixCategories) {
     EXPECT_EQ(filtered[0].relativePath, "docs/report.txt");
 }
 
-/** Type presets, wildcard exclusions and metadata-only preview agree with packing. */
+/** Type presets, wildcard exclusions and metadata-only preview agree with packing */
 TEST_F(ArchiveServiceTest, PreviewWithMultiExtensionAndWildcardRules) {
     std::string error;
     WriteFile(srcDir + "/report.pdf", "document");

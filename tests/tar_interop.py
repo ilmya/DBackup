@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 验证备份与外部 tar 工具的互操作性
 """Cross-check plain POSIX pax tar with the system tar implementation."""
 import argparse
 import io

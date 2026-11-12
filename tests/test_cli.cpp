@@ -1,6 +1,6 @@
-#include "core/archive.h"
-#include "core/credential_store.h"
-#include "core/repository.h"
+// 验证测试命令行的参数与操作
+#include "core/archive/archive.h"
+#include "core/security/credential_store.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -22,7 +22,6 @@
 
 namespace {
 const char* kMarker = ".dbackup-acceptance.json";
-const char* kTestPassword = "DBackup-Acceptance-Only!2026";
 
 struct Arguments {
     QString command;
@@ -102,15 +101,6 @@ bool insideRoot(const QString& root, const QString& path, QString& normalized, Q
         cursor = parent;
     }
     normalized = absolute;
-    return true;
-}
-
-bool getRootAndPath(const Arguments& args, const QString& option, QString& root, QString& path,
-                    QString& error) {
-    if (!readRoot(args.value("--root"), root, error))
-        return false;
-    if (!insideRoot(root, args.value(option), path, error))
-        return false;
     return true;
 }
 
@@ -283,95 +273,6 @@ bool archiveCommand(const Arguments& args, QString& error, QJsonObject& data) {
     return false;
 }
 
-bool repositoryCommand(const Arguments& args, QString& error, QJsonObject& data) {
-    QString root, repositoryPath;
-    if (!getRootAndPath(args, "--repository", root, repositoryPath, error))
-        return false;
-    LocalRepository repository(repositoryPath.toUtf8().toStdString());
-    std::string detail;
-    const QString password =
-        qEnvironmentVariable("DBACKUP_TEST_PASSWORD", QString::fromLatin1(kTestPassword));
-    const QString operation = args.rest.value(0);
-    if (!repository.initialize(password.toUtf8().toStdString(), detail)) {
-        error = QString::fromUtf8(detail.c_str());
-        return false;
-    }
-    if (operation == "init") {
-        data = {{"repository", repositoryPath}, {"initialized", true}};
-        return true;
-    }
-    if (operation == "snapshot") {
-        SnapshotOptions options;
-        options.password = password.toUtf8().toStdString();
-        if (!getSources(args, root, options.sources, error))
-            return false;
-        if (!parseFilter(args, options.filter, error))
-            return false;
-        SnapshotInfo snapshot;
-        if (!repository.createSnapshot(options, snapshot, detail, contextForProgress())) {
-            error = QString::fromUtf8(detail.c_str());
-            return false;
-        }
-        data = {{"id", QString::fromUtf8(snapshot.id.c_str())},
-                {"partial", snapshot.partial},
-                {"warning", QString::fromUtf8(detail.c_str())},
-                {"files", static_cast<qint64>(snapshot.fileCount)},
-                {"bytes", static_cast<qint64>(snapshot.logicalBytes)},
-                {"storedBytes", static_cast<qint64>(snapshot.storedBytes)}};
-        return true;
-    }
-    if (operation == "list") {
-        std::vector<SnapshotInfo> snapshots;
-        if (!repository.listSnapshots(snapshots, detail)) {
-            error = QString::fromUtf8(detail.c_str());
-            return false;
-        }
-        QJsonArray values;
-        for (const auto& snapshot : snapshots)
-            values.append(QJsonObject{{"id", QString::fromUtf8(snapshot.id.c_str())},
-                                      {"createdAt", static_cast<qint64>(snapshot.createdAtMs)}});
-        data = {{"snapshots", values}};
-        return true;
-    }
-    if (operation == "restore") {
-        QString destination;
-        if (!insideRoot(root, args.value("--output"), destination, error))
-            return false;
-        const bool ok = repository.restoreSnapshot(
-            args.value("--id").toStdString(), destination.toUtf8().toStdString(),
-            password.toUtf8().toStdString(), detail, contextForProgress());
-        if (!ok)
-            error = QString::fromUtf8(detail.c_str());
-        else
-            data = {{"destination", destination}};
-        return ok;
-    }
-    if (operation == "delete") {
-        const bool ok = repository.deleteSnapshot(args.value("--id").toStdString(), detail);
-        if (!ok)
-            error = QString::fromUtf8(detail.c_str());
-        else
-            data = {{"deleted", args.value("--id")}};
-        return ok;
-    }
-    if (operation == "prune") {
-        bool valid = false;
-        const int keep = args.value("--keep").toInt(&valid);
-        if (!valid || keep < 1 || keep > 1000) {
-            error = "--keep 必须为 1 到 1000";
-            return false;
-        }
-        const bool ok = repository.prune(static_cast<size_t>(keep), detail);
-        if (!ok)
-            error = QString::fromUtf8(detail.c_str());
-        else
-            data = {{"kept", keep}};
-        return ok;
-    }
-    error = "repository 子命令须为 snapshot、list、restore、delete 或 prune";
-    return false;
-}
-
 void printHelp() {
     std::cout << "BackupToolTestCli - development-only DBackup test driver\n"
               << "Commands (all file paths are restricted to a marked acceptance root):\n"
@@ -380,13 +281,7 @@ void printHelp() {
                  "[--algorithm none|huffman|lz77|deflate] [--filter SPEC]\n"
               << "  archive inspect --root DIR --input FILE\n"
               << "  archive extract --root DIR --input FILE --output DIR [--skip-device-nodes]\n"
-              << "  repository snapshot --root DIR --repository DIR --source PATH [--source PATH]\n"
-              << "  repository init     --root DIR --repository DIR\n"
-              << "  repository list --root DIR --repository DIR\n"
-              << "  repository restore --root DIR --repository DIR --id ID --output DIR\n"
-              << "  repository delete --root DIR --repository DIR --id ID\n"
-              << "  repository prune --root DIR --repository DIR --keep N\n"
-              << "Set DBACKUP_TEST_PASSWORD to override the test-only repository password.\n";
+              << "Set DBACKUP_TEST_PASSWORD to override the test-only backup password.\n";
 }
 } // namespace
 
@@ -405,8 +300,6 @@ int main(int argc, char** argv) {
     bool ok = false;
     if (args.command == "archive")
         ok = archiveCommand(args, error, data);
-    else if (args.command == "repository")
-        ok = repositoryCommand(args, error, data);
     else {
         error = "未知命令；使用 --help 查看用法";
     }

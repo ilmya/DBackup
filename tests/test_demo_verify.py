@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 验证演示结果验证逻辑
 import os
 from contextlib import redirect_stdout
 import io

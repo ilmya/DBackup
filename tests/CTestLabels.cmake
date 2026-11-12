@@ -1,5 +1,6 @@
-# This file is included by CTest after GoogleTest has generated its test list.
-# Keep this allowlist small: all filesystem and cross-module cases are integration tests.
+# 为 CTest 测试分类并设置标签
+# This file is included by CTest after GoogleTest has generated its test list
+# Keep this allowlist small: all filesystem and cross-module cases are integration tests
 set(_dbackup_unit_test_names
     CryptoTest.Sha256MatchesKnownVector
     CryptoTest.Pbkdf2IsDeterministicAndProducesRequestedLength
@@ -26,7 +27,7 @@ set(_dbackup_unit_test_names
 
 foreach(_test IN LISTS BackupToolTests_TESTS BackupToolAutomationTests_TESTS)
     list(FIND _dbackup_unit_test_names "${_test}" _unit_index)
-    if(NOT _unit_index EQUAL -1 OR _test MATCHES "^(JobPolicy|JobRunPolicy|CronRules|RepositoryPolicy|TarRules)\\.")
+    if(NOT _unit_index EQUAL -1 OR _test MATCHES "^(JobPolicy|JobRunPolicy|CronRules|TarRules)\\.")
         set_tests_properties("${_test}" PROPERTIES LABELS unit)
     else()
         set_tests_properties("${_test}" PROPERTIES LABELS integration)

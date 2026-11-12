@@ -1,3 +1,4 @@
+// 验证备份计划管理与触发
 #include <gtest/gtest.h>
 
 #include <QCoreApplication>
@@ -17,12 +18,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "automation/cron.h"
-#include "automation/directory_watcher.h"
+#include "automation/schedule/cron.h"
+#include "automation/realtime/directory_watcher.h"
 #include "automation/job_manager.h"
 #include "automation/plan_executor.h"
-#include "core/repository.h"
-#include "core/incremental_chain.h"
+#include "core/incremental/incremental_chain.h"
 #include "test_support.h"
 
 namespace {
@@ -40,7 +40,7 @@ BackupJob makeJob() {
     job.id = "job-test";
     job.name = "Test backup";
     job.sources = {"/tmp/dbackup-test/source"};
-    job.destination = "/tmp/dbackup-test/repository";
+    job.destination = "/tmp/dbackup-test/output";
     job.cron = "* * * * *";
     return job;
 }
@@ -111,6 +111,7 @@ TEST_F(JobManagerTest, PersistsRealtimeOnlySelectionRulesAndPartialResult) {
     BackupJob job = makeJob();
     job.scheduled = false;
     job.realtime = true;
+    job.tarIncremental = true;
     job.cron.clear();
     job.filter.sourceRules = {{"/tmp/dbackup-test/source", true},
                               {"/tmp/dbackup-test/source/skip", false}};
@@ -139,7 +140,6 @@ TEST_F(JobManagerTest, PersistsRealtimeOnlySelectionRulesAndPartialResult) {
 TEST_F(JobManagerTest, PersistsManualArchivePlanAndRejectsRealtimeArchive) {
     auto job = makeJob();
     job.scheduled = false;
-    job.repository = false;
     job.encrypted = false;
     job.format = PackFormat::Tar;
     job.compression = Compression::None;
@@ -151,7 +151,6 @@ TEST_F(JobManagerTest, PersistsManualArchivePlanAndRejectsRealtimeArchive) {
     JobManager restored(nullptr, configPath());
     ASSERT_EQ(restored.jobs().size(), 1);
     const auto& loaded = restored.jobs().first();
-    EXPECT_FALSE(loaded.repository);
     EXPECT_FALSE(loaded.encrypted);
     EXPECT_FALSE(loaded.scheduled);
     EXPECT_EQ(loaded.format, PackFormat::Tar);
@@ -159,6 +158,46 @@ TEST_F(JobManagerTest, PersistsManualArchivePlanAndRejectsRealtimeArchive) {
     job.realtime = true;
     EXPECT_FALSE(restored.upsert(job, error));
     EXPECT_FALSE(restored.jobs().first().realtime);
+}
+
+TEST_F(JobManagerTest, LoadsSupportedPlansAndSkipsLegacyRepositoryPlan) {
+    QString error;
+    {
+        JobManager manager(nullptr, configPath());
+        ASSERT_TRUE(manager.upsert(makeJob(), error)) << error.toStdString();
+    }
+    QFile config(configPath());
+    ASSERT_TRUE(config.open(QIODevice::ReadOnly));
+    auto document = QJsonDocument::fromJson(config.readAll()).object();
+    config.close();
+    auto jobs = document.value("jobs").toArray();
+    ASSERT_EQ(jobs.size(), 1);
+    EXPECT_FALSE(jobs.first().toObject().contains("repository"));
+    auto legacy = jobs.first().toObject();
+    legacy["id"] = "legacy-repository";
+    legacy["repository"] = true;
+    jobs.append(legacy);
+    auto incremental = jobs.first().toObject();
+    incremental["id"] = "incremental-plan";
+    incremental["repository"] = true;
+    incremental["tarIncremental"] = true;
+    jobs.append(incremental);
+    document["jobs"] = jobs;
+    ASSERT_TRUE(writeConfig(QJsonDocument(document)));
+
+    JobManager restored(nullptr, configPath());
+    EXPECT_TRUE(restored.loadError().isEmpty());
+    ASSERT_EQ(restored.jobs().size(), 2);
+    EXPECT_FALSE(restored.jobs()[0].tarIncremental);
+    EXPECT_TRUE(restored.jobs()[1].tarIncremental);
+    ASSERT_TRUE(restored.upsert(restored.jobs().first(), error)) << error.toStdString();
+    ASSERT_TRUE(config.open(QIODevice::ReadOnly));
+    const auto savedJobs = QJsonDocument::fromJson(config.readAll()).object().value("jobs").toArray();
+    ASSERT_EQ(savedJobs.size(), 2);
+    for (const auto& value : savedJobs) {
+        EXPECT_FALSE(value.toObject().contains("repository"));
+        EXPECT_NE(value.toObject().value("id").toString(), "legacy-repository");
+    }
 }
 
 TEST_F(JobManagerTest, PersistsAndExecutesRealtimeTarIncrementalPlan) {
@@ -172,7 +211,6 @@ TEST_F(JobManagerTest, PersistsAndExecutesRealtimeTarIncrementalPlan) {
     auto job = makeJob();
     job.sources = {data.filePath("source")};
     job.destination = data.path();
-    job.repository = false;
     job.tarIncremental = true;
     job.encrypted = false;
     job.format = PackFormat::Tar;
@@ -189,7 +227,6 @@ TEST_F(JobManagerTest, PersistsAndExecutesRealtimeTarIncrementalPlan) {
     const auto loaded = restored.jobs().first();
     EXPECT_TRUE(loaded.tarIncremental);
     EXPECT_TRUE(loaded.realtime);
-    EXPECT_FALSE(loaded.repository);
     const auto first = executePlan(loaded, "");
     ASSERT_TRUE(first.success) << first.detail;
     ASSERT_TRUE(source.open(QIODevice::WriteOnly | QIODevice::Truncate));
@@ -218,7 +255,6 @@ TEST_F(JobManagerTest, PersistsAndExecutesRealtimeCustomIncrementalPlan) {
     auto job = makeJob();
     job.sources = {data.filePath("source")};
     job.destination = data.path();
-    job.repository = false;
     job.tarIncremental = true;
     job.encrypted = false;
     job.format = PackFormat::Custom;
@@ -252,12 +288,7 @@ TEST_F(JobManagerTest, ValidatesPlanFieldsAndRejectsUnsafeIdentifiers) {
     ASSERT_TRUE(manager.upsert(valid, error)) << error.toStdString();
 
     auto invalid = valid;
-    invalid.repository = false;
     invalid.realtime = true;
-    EXPECT_FALSE(manager.upsert(invalid, error));
-
-    invalid = valid;
-    invalid.encrypted = false;
     EXPECT_FALSE(manager.upsert(invalid, error));
 
     invalid = valid;
@@ -330,7 +361,6 @@ TEST_F(JobManagerTest, ArchivePlanCreatesIndependentTarAndKeepsLatestOnSuccess) 
     source.write("data");
     source.close();
     auto job = makeJob();
-    job.repository = false;
     job.encrypted = false;
     job.scheduled = false;
     job.format = PackFormat::Tar;
@@ -371,7 +401,6 @@ TEST_F(JobManagerTest, PartialArchivePlanDoesNotPrunePreviousArchive) {
     good.write("data");
     good.close();
     auto job = makeJob();
-    job.repository = false;
     job.encrypted = false;
     job.scheduled = false;
     job.sources = {dir.filePath("source")};
@@ -400,8 +429,9 @@ TEST_F(JobManagerTest, RebuildingRealtimePlanRequestsRescanAndHonorsPause) {
     auto job = makeJob();
     job.scheduled = false;
     job.realtime = true;
+    job.tarIncremental = true;
     job.sources = {directory.filePath("source")};
-    job.destination = directory.filePath("repository");
+    job.destination = directory.filePath("backup-output");
     JobManager manager(nullptr, configPath());
     QList<BackupJob> executions;
     manager.setExecutor([&](const BackupJob& value) { executions.append(value); });
@@ -431,8 +461,9 @@ TEST_F(JobManagerTest, EditingAnotherPlanKeepsPendingRealtimeChange) {
     auto job = makeJob();
     job.scheduled = false;
     job.realtime = true;
+    job.tarIncremental = true;
     job.sources = {directory.filePath("source")};
-    job.destination = directory.filePath("repository");
+    job.destination = directory.filePath("backup-output");
     JobManager manager(nullptr, configPath());
     int executions = 0;
     BackupJob requested;
@@ -476,9 +507,10 @@ TEST_F(JobManagerTest, RealtimeJobWatchesSelectedSingleFile) {
     BackupJob job = makeJob();
     job.scheduled = false;
     job.realtime = true;
+    job.tarIncremental = true;
     job.cron.clear();
     job.sources = {selected};
-    job.destination = directory.filePath("repository");
+    job.destination = directory.filePath("backup-output");
     JobManager manager(nullptr, configPath());
     int executions = 0;
     BackupJob requested;
@@ -523,7 +555,6 @@ TEST_F(JobManagerTest, RealtimeChangeCreatesTarIncrementAndRestoresIt) {
     auto job = makeJob();
     job.scheduled = false;
     job.realtime = true;
-    job.repository = false;
     job.tarIncremental = true;
     job.encrypted = false;
     job.format = PackFormat::Tar;
@@ -588,8 +619,9 @@ TEST_F(JobManagerTest, RealtimeContinuesWhenSubdirectoryCannotBeRead) {
     auto job = makeJob();
     job.scheduled = false;
     job.realtime = true;
+    job.tarIncremental = true;
     job.sources = {directory.filePath("source")};
-    job.destination = directory.filePath("repository");
+    job.destination = directory.filePath("backup-output");
     JobManager manager(nullptr, configPath());
     int executions = 0;
     manager.setExecutor([&](const BackupJob&) { ++executions; });
@@ -625,23 +657,20 @@ TEST_F(JobManagerTest, RealtimeJobBacksUpSelectedSocket) {
     BackupJob job = makeJob();
     job.scheduled = false;
     job.realtime = true;
+    job.tarIncremental = true;
     job.cron.clear();
     job.sources = {selected};
-    job.destination = directory.filePath("repository");
-    LocalRepository repo(job.destination.toStdString());
+    job.destination = directory.path();
+    job.encrypted = false;
     std::string detail;
-    ASSERT_TRUE(repo.initialize("test-only", detail)) << detail;
     JobManager manager(nullptr, configPath());
-    SnapshotInfo snapshot;
     int executions = 0;
     bool succeeded = false;
     manager.setExecutor([&](const BackupJob& requested) {
         ++executions;
-        SnapshotOptions options;
-        options.password = "test-only";
-        for (const auto& source : requested.sources)
-            options.sources.push_back(source.toStdString());
-        succeeded = repo.createSnapshot(options, snapshot, detail);
+        const auto result = executePlan(requested, "");
+        succeeded = result.success;
+        detail = result.detail;
     });
     QString error;
     ASSERT_TRUE(manager.upsert(job, error)) << error.toStdString();
@@ -664,7 +693,13 @@ TEST_F(JobManagerTest, RealtimeJobBacksUpSelectedSocket) {
     ASSERT_EQ(executions, 1);
     ASSERT_TRUE(succeeded) << detail;
     const auto output = directory.filePath("restored");
-    ASSERT_TRUE(repo.restoreSnapshot(snapshot.id, output.toStdString(), "test-only", detail))
+    const auto chain = QDir(job.destination).filePath("dbackup-" + job.id + "-tar-incremental");
+    std::vector<dbackup::incremental::VersionInfo> versions;
+    ASSERT_TRUE(dbackup::incremental::listVersions(chain.toStdString(), "", {}, versions, detail))
+        << detail;
+    ASSERT_EQ(versions.size(), 1u);
+    ASSERT_TRUE(dbackup::incremental::restoreVersion(chain.toStdString(), versions[0].sequence, "",
+                                                       output.toStdString(), {}, detail))
         << detail;
     struct stat info {};
     ASSERT_EQ(lstat((output + "/endpoint.sock").toUtf8().constData(), &info), 0);

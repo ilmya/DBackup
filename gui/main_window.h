@@ -1,6 +1,8 @@
+// 应用主窗口、备份恢复入口和任务界面
+// 声明主窗口页面、用户操作入口及后台状态，协调界面控件与计划管理器。
 #pragma once
 
-#include "core/archive.h"
+#include "core/archive/archive.h"
 #include <QMainWindow>
 #include <QPointer>
 #include <QStringList>
@@ -23,53 +25,54 @@ class QDialog;
 class JobManager;
 struct BackupJob;
 
+// 主窗口负责组织页面、后台备份恢复、计划管理与托盘交互。
 class MainWindow final : public QMainWindow {
   public:
-    // 创建主窗口、功能页、活动日志及自动任务管理器。
+    // 创建主窗口、功能页、活动日志及自动任务管理器
     explicit MainWindow(QWidget* parent = nullptr);
 
   protected:
-    // 关闭主窗口时隐藏到托盘或按退出状态结束程序。
+    // 关闭主窗口时隐藏到托盘或按退出状态结束程序
     void closeEvent(QCloseEvent* event) override;
 
   private:
-    // 创建来源树、输出格式和筛选入口所在的备份页。
+    // 创建来源树、输出格式和筛选入口所在的备份页
     QWidget* createBackupPage();
-    // 创建归档文件、目标目录和恢复选项所在的恢复页。
+    // 创建备份文件、目标目录和恢复选项所在的恢复页
     QWidget* createRestorePage();
-    // 创建定时/实时任务列表及编辑操作所在的页面。
+    // 创建定时/实时任务列表及编辑操作所在的页面
     QWidget* createSchedulePage();
-    // 创建本地增量仓库快照列表和恢复入口。
+    // 创建计划备份的历史版本列表和恢复入口
     QWidget* createHistoryPage(const BackupJob& job);
-    // 创建凭据和日志等通用设置页。
+    // 创建凭据和日志等通用设置页
     QWidget* createSettingsPage();
-    // 创建统一标题、内容布局和页边距的功能页容器。
+    // 创建统一标题、内容布局和页边距的功能页容器
     QWidget* createPageShell(const QString& title, QVBoxLayout** content);
-    // 选择并验证独立归档或仓库的输出目标。
+    // 选择完整备份的输出文件
     void chooseBackupTarget();
-    // 打开筛选配置并刷新当前筛选摘要。
+    // 打开筛选配置并刷新当前筛选摘要
     void editFilters();
-    // 扫描所选来源并展示文件类型、大小与不可读对象统计。
+    // 扫描所选来源并展示文件类型、大小与不可读对象统计
     void previewFilters();
-    // 按当前来源和选项启动独立归档备份。
+    // 按当前来源和选项启动完整备份
     void startBackup();
-    // 选择用于恢复的归档文件。
+    // 选择用于恢复的备份文件
     void chooseArchive();
-    // 选择恢复目标目录。
+    // 选择恢复目标目录
     void chooseRestoreFolder();
-    // 校验密码和目标后启动归档恢复。
+    // 校验密码和目标后启动备份恢复
     void startRestore();
-    // 更新操作期间按钮状态和状态栏提示。
+    // 更新操作期间按钮状态和状态栏提示
     void setBusy(bool busy, const QString& message = {});
-    // 将后台进度映射到进度条和阶段说明。
+    // 将后台进度映射到进度条和阶段说明
     void updateProgress(const OperationProgress& progress);
-    // 向可滚动活动日志追加一条状态或错误记录。
+    // 向可滚动活动日志追加一条状态或错误记录
     void appendLog(const QString& message, bool error = false);
-    // 根据树模型中的来源选择更新来源计数。
+    // 根据树模型中的来源选择更新来源计数
     void updateSourceSummary();
-    // 根据当前条件更新筛选摘要文本。
+    // 根据当前条件更新筛选摘要文本
     void updateFilterSummary();
-    // 解析来源树选择及过滤规则，生成执行器使用的来源列表。
+    // 解析来源树选择及过滤规则，生成执行器使用的来源列表
     std::vector<std::string> sourcePaths() const;
 
     QStackedWidget* pages_ = nullptr;

@@ -181,43 +181,33 @@
     },
     {
       "id": "S5-INCR-001",
-      "area": "repository",
-      "fixture": [
-        "fixtures/incremental"
-      ],
-      "expected": "A local encrypted snapshot restores to the same paths and SHA-256 values."
+      "area": "incremental",
+      "fixture": [],
+      "expected": "A full version can be listed and restored without overwriting an existing target."
     },
     {
       "id": "S5-INCR-002",
-      "area": "repository",
-      "fixture": [
-        "fixtures/incremental"
-      ],
-      "expected": "An unchanged second snapshot reuses existing content-addressed blocks."
+      "area": "incremental",
+      "fixture": [],
+      "expected": "File state comparison identifies added, changed, and deleted paths."
     },
     {
       "id": "S5-INCR-003",
-      "area": "repository",
-      "fixture": [
-        "fixtures/incremental"
-      ],
-      "expected": "A small in-file change creates a recoverable second snapshot without losing the first."
+      "area": "incremental",
+      "fixture": [],
+      "expected": "Content change is detected even when file size and timestamp are unchanged."
     },
     {
       "id": "S5-INCR-004",
-      "area": "repository",
-      "fixture": [
-        "fixtures/incremental"
-      ],
-      "expected": "First/last block, mtime-only, and attribute-only changes are reflected in restore."
+      "area": "incremental",
+      "fixture": [],
+      "expected": "File, directory, and symbolic-link transitions restore across versions."
     },
     {
       "id": "S5-INCR-007",
-      "area": "repository",
-      "fixture": [
-        "fixtures/incremental"
-      ],
-      "expected": "Pruning retains the requested latest snapshots and does not remove referenced chunks."
+      "area": "incremental",
+      "fixture": [],
+      "expected": "Retention rebases the oldest kept version and preserves recoverability."
     }
   ],
   "manualCases": [

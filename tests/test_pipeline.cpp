@@ -1,9 +1,10 @@
-#include "core/archive_internal.h"
-#include "core/archive_blocks.h"
-#include "core/archive_tar.h"
-#include "core/compression.h"
-#include "core/crypto.h"
-#include "core/md5.h"
+// 验证备份流式处理
+#include "core/archive/archive_internal.h"
+#include "core/archive/archive_blocks.h"
+#include "core/archive/archive_tar.h"
+#include "core/compression/compression.h"
+#include "core/security/crypto.h"
+#include "core/security/md5.h"
 #include "test_support.h"
 #include <algorithm>
 #include <fcntl.h>
@@ -49,7 +50,7 @@ TEST(ArchiveBlocks, RoundTripAndAuthenticatedMetadata) {
                 EXPECT_FALSE(dbackup::archive_blocks::decode(out, restored, "wrong", format, {}, error));
                 close(restored);
                 unsigned char changed = 1;
-                ASSERT_EQ(pwrite(out, &changed, 1, 45), 1); // Raw length is authenticated.
+                ASSERT_EQ(pwrite(out, &changed, 1, 45), 1); // 原始长度参与认证
                 ASSERT_EQ(lseek(out, 0, SEEK_SET), 0);
                 restored = open(output.c_str(), O_TRUNC | O_RDWR);
                 ASSERT_GE(restored, 0);
@@ -97,13 +98,13 @@ TEST(ArchiveBlocks, RejectsTruncatedReorderedAndTamperedRecords) {
         return !ok;
     };
     auto changed = good;
-    changed[41] ^= 1; // First block sequence.
+    changed[41] ^= 1; // 修改第一个数据块的序号
     EXPECT_TRUE(rejected(changed));
     changed = good;
-    changed[53] ^= 1; // First encrypted payload byte.
+    changed[53] ^= 1; // 修改第一个加密数据字节
     EXPECT_TRUE(rejected(changed));
     changed = good;
-    changed.back() ^= 1; // End-record authentication tag.
+    changed.back() ^= 1; // 修改结束记录的认证标签
     EXPECT_TRUE(rejected(changed));
     EXPECT_TRUE(rejected(good.substr(0, good.size() - 1)));
     EXPECT_TRUE(rejected(good + "x"));

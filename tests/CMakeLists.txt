@@ -1,13 +1,12 @@
+# 配置项目构建目标、依赖和测试
 add_executable(BackupToolTests
-    # Core archive and crypto regression suite.
+    # Core archive and crypto regression suite
     test_archive.cpp
     test_crypto.cpp
     test_pipeline.cpp
     test_tar_rules.cpp
     test_linux_scan.cpp
     test_linux_filesystem.cpp
-    test_repository.cpp
-    test_repository_policy.cpp
     test_incremental_diff.cpp
 )
 
@@ -20,7 +19,7 @@ target_link_libraries(BackupToolTests PRIVATE
 include(GoogleTest)
 gtest_discover_tests(BackupToolTests)
 
-# No session bus is reachable, so this test cannot touch a personal keyring.
+# No session bus is reachable, so this test cannot touch a personal keyring
 add_executable(CredentialUnavailableTest test_credential_unavailable.cpp)
 target_link_libraries(CredentialUnavailableTest PRIVATE dbackup_core GTest::gtest_main)
 add_test(NAME CredentialUnavailableTest
@@ -35,8 +34,8 @@ if(TARGET Qt6::Core)
         test_job_policy.cpp
         test_job_manager_main.cpp
         ../automation/job_manager.cpp
-        ../automation/cron.cpp
-        ../automation/directory_watcher.cpp
+        ../automation/schedule/cron.cpp
+        ../automation/realtime/directory_watcher.cpp
         ../automation/job_manager.h)
     target_include_directories(BackupToolAutomationTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
     target_link_libraries(BackupToolAutomationTests PRIVATE
@@ -48,8 +47,8 @@ if(TARGET Qt6::Core)
     gtest_discover_tests(BackupToolAutomationTests)
 endif()
 
-# GTest cases are discovered after build, so assign per-case labels from CTest.
-# Keep this include last so both GTest test lists are available when CTest reads it.
+# GTest cases are discovered after build, so assign per-case labels from CTest
+# Keep this include last so both GTest test lists are available when CTest reads it
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/CTestLabels.cmake")
 

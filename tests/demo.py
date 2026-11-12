@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 生成并验证演示备份场景
 """Compare the fixed WSL manual-acceptance corpus."""
 
 from __future__ import annotations
@@ -89,7 +90,7 @@ def clear_restore(root: Path) -> int:
     restore = root / 'restore'
     if not shutil.rmtree.avoids_symlink_attacks:
         raise tool.SafetyError('当前 Python 不支持安全删除目录，拒绝清理')
-    # Refuse mounted filesystems, including bind mounts that can share st_dev.
+    # Refuse mounted filesystems, including bind mounts that can share st_dev
     try:
         mountinfo = Path('/proc/self/mountinfo').read_text(encoding='utf-8')
     except OSError as exc:

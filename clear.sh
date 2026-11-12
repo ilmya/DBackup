@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# 清理项目构建产物的脚本
+set -eo pipefail
 
 project="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python3 -B - "$project" <<'PY'

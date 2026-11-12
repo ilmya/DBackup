@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 对比验收场景的预期与实际结果
 """Run the independent filesystem comparison with DBackup path semantics."""
 
 import argparse

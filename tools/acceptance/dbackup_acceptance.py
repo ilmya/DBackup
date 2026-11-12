@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 根据验收场景目录运行测试并生成报告
 """Independent acceptance-data and comparison tool for DBackup.
 
 This program deliberately does not import or inspect DBackup code or manifests.
@@ -100,7 +101,7 @@ def ensure_layout(root: Path) -> None:
     for relative in ("fixtures/normal", "fixtures/compression", "fixtures/filters",
                      "fixtures/permissions", "fixtures/links", "fixtures/incremental",
                      "fixtures/realtime", "restore", "archives",
-                     "repositories", "manifests", "reports", "evidence"):
+                     "manifests", "reports", "evidence"):
         (root / relative).mkdir(parents=True, exist_ok=True)
 
 
@@ -547,30 +548,6 @@ def command_hold_pipe(args: argparse.Namespace) -> int:
     finally:
         fifo.unlink(missing_ok=True)
 
-def command_inspect_repository(args: argparse.Namespace) -> int:
-    repository = Path(args.repository).resolve()
-    files = [path for path in repository.rglob("*") if path.is_file()]
-    chunks = [path for path in files if path.suffix.lower() == ".blk"]
-    current = {"repository": str(repository), "generatedAt": now_iso(),
-               "fileCount": len(files), "totalBytes": sum(path.stat().st_size for path in files),
-               "chunkCount": len(chunks), "chunkBytes": sum(path.stat().st_size for path in chunks)}
-    results = [{"status": "PASS", "category": "Repository", "path": str(repository),
-                "detail": f"{len(chunks)} blocks, {current['chunkBytes']} bytes"}]
-    evidence: list[str] = []
-    if args.baseline:
-        baseline_path = Path(args.baseline)
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        results.append({"status": "PASS", "category": "Delta", "path": str(repository),
-                        "detail": f"新增块 {current['chunkCount'] - baseline['chunkCount']}，新增字节 {current['chunkBytes'] - baseline['chunkBytes']}"})
-        evidence.append(str(baseline_path.resolve()))
-    snapshot = Path(args.report).with_suffix(".repository.json")
-    save_json(snapshot, current)
-    evidence.append(str(snapshot.resolve()))
-    write_report(Path(args.report), "DBackup 增量仓库统计报告", " ".join(sys.argv), results, evidence)
-    print(f"Repository report: {Path(args.report).resolve()}")
-    return EXIT_OK
-
-
 def safe_cleanup(root: Path, confirmed: bool) -> None:
     marker = load_marker(root)
     if not confirmed:
@@ -641,11 +618,6 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--report", required=True)
     compare.add_argument("--mtime-tolerance", type=float, default=2.0)
     compare.set_defaults(handler=command_compare)
-    inspect = sub.add_parser("inspect-repository")
-    inspect.add_argument("--repository", required=True)
-    inspect.add_argument("--report", required=True)
-    inspect.add_argument("--baseline")
-    inspect.set_defaults(handler=command_inspect_repository)
     cleanup = sub.add_parser("cleanup")
     cleanup.add_argument("--root")
     cleanup.add_argument("--yes", action="store_true")

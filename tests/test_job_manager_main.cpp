@@ -1,3 +1,4 @@
+// 验证计划管理测试的程序入口
 #include <gtest/gtest.h>
 
 #include <QCoreApplication>

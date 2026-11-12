@@ -1,8 +1,9 @@
+// 验证主窗口布局
 #include "gui/main_window.h"
 #include "gui/theme.h"
 #include "automation/job_manager.h"
 #include "automation/plan_executor.h"
-#include "core/credential_store.h"
+#include "core/security/credential_store.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QDialog>
@@ -108,22 +109,18 @@ TEST(MainWindowLayout, PlanEditorIsIndependentAndEnforcesRunOptions) {
     auto* realtime = editor->findChild<QRadioButton*>("planRealtime");
     auto* cron = editor->findChild<QLineEdit*>("planCron");
     auto* full = editor->findChild<QRadioButton*>("backupMode0");
-    auto* repo = editor->findChild<QRadioButton*>("backupMode1");
-    auto* tarIncremental = editor->findChild<QRadioButton*>("backupMode2");
+    auto* tarIncremental = editor->findChild<QRadioButton*>("backupMode1");
     auto* tarFormat = editor->findChild<QRadioButton*>("packFormat1");
     auto* customFormat = editor->findChild<QRadioButton*>("packFormat0");
     auto* compression = editor->findChild<QCheckBox*>("compressionEnabled");
-    auto* hint = editor->findChild<QLabel*>("repositoryHint");
-    ASSERT_TRUE(scheduled && realtime && cron && full && repo && tarIncremental && tarFormat && customFormat && compression && hint);
+    ASSERT_TRUE(scheduled && realtime && cron && full && tarIncremental && tarFormat && customFormat && compression);
     EXPECT_TRUE(scheduled->isChecked());
     EXPECT_TRUE(cron->isEnabled());
     realtime->setChecked(true);
     EXPECT_FALSE(scheduled->isChecked());
     EXPECT_FALSE(cron->isEnabled());
-    EXPECT_TRUE(repo->isChecked());
+    EXPECT_TRUE(tarIncremental->isChecked());
     EXPECT_FALSE(full->isEnabled());
-    EXPECT_TRUE(hint->isVisible());
-    tarIncremental->setChecked(true);
     EXPECT_TRUE(tarFormat->isEnabled());
     EXPECT_TRUE(customFormat->isEnabled());
     customFormat->setChecked(true);
@@ -131,13 +128,11 @@ TEST(MainWindowLayout, PlanEditorIsIndependentAndEnforcesRunOptions) {
     tarFormat->setChecked(true);
     EXPECT_TRUE(tarFormat->isChecked());
     EXPECT_TRUE(compression->isEnabled());
-    EXPECT_FALSE(hint->isVisible());
     scheduled->setChecked(true);
     EXPECT_FALSE(realtime->isChecked());
     EXPECT_TRUE(cron->isEnabled());
     EXPECT_TRUE(full->isEnabled());
     EXPECT_TRUE(full->isChecked());
-    EXPECT_FALSE(hint->isVisible());
     add->click();
     int editors = 0;
     for (auto* widget : QApplication::topLevelWidgets())
@@ -161,7 +156,6 @@ TEST(MainWindowLayout, PlanDetailsLoadsSelectedIncrementalHistory) {
     job.name = "History plan";
     job.sources = {data.filePath("source")};
     job.destination = data.path();
-    job.repository = false;
     job.tarIncremental = true;
     job.encrypted = false;
     job.scheduled = false;
@@ -214,7 +208,6 @@ TEST(MainWindowLayout, EncryptedHistoryLoadsWithoutSavedPassword) {
     job.name = "Encrypted history";
     job.sources = {data.filePath("source")};
     job.destination = data.path();
-    job.repository = false;
     job.tarIncremental = true;
     job.encrypted = true;
     job.scheduled = false;

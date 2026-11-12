@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 执行独立验收场景的入口脚本
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +58,7 @@ DBackup development acceptance commands (run from any directory in Linux):
   tests/acceptance.sh realtime-events --root ROOT
 
 Other established commands are forwarded to tools/acceptance/acceptance.sh, including
-compare, manifest, prepare-links, prepare-permissions, inspect-repository, and cleanup.
+compare, manifest, prepare-links, prepare-permissions, and cleanup.
 HELP
     ;;
   *)

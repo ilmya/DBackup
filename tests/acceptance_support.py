@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 验收场景共用的运行与结果处理工具
 """Extra safe acceptance operations that supplement the independent toolkit."""
 
 import argparse
@@ -32,40 +33,23 @@ def fault_copy(args) -> int:
     if source == output or not source.exists() or output.exists():
         raise tool.SafetyError("来源必须存在，输出必须是不存在的独立路径")
     output.parent.mkdir(parents=True, exist_ok=True)
-    if args.kind.startswith("repo-"):
-        if not source.is_dir():
-            raise ValueError("repo-* 故障类型的输入必须为仓库目录")
-        shutil.copytree(source, output, symlinks=True)
-        chunks = [p for p in (output / "chunks").rglob("*.blk") if p.is_file() and not p.is_symlink()]
-        if not chunks:
-            raise ValueError("仓库中没有可修改的数据块")
-        target = chunks[0]
-        if args.kind == "repo-missing":
-            target.unlink()
-        else:
-            content = bytearray(target.read_bytes())
-            if not content:
-                raise ValueError("数据块为空，不能生成损坏副本")
-            content[len(content) // 2] ^= 0x01
-            target.write_bytes(content)
-    else:
-        if not source.is_file():
-            raise ValueError("归档故障类型的输入必须为普通文件")
-        shutil.copyfile(source, output)
-        content = bytearray(output.read_bytes())
-        if args.kind == "archive-empty":
-            content.clear()
-        elif args.kind == "archive-truncate":
-            content = content[:len(content) // 2]
-        elif args.kind == "archive-header":
-            if content:
-                content[0] ^= 0xFF
-        elif args.kind == "archive-tag":
-            if len(content) < 48:
-                output.unlink(missing_ok=True)
-                raise ValueError("归档样本过短，无法翻转尾部认证数据")
-            content[-1] ^= 0x01
-        output.write_bytes(content)
+    if not source.is_file():
+        raise ValueError("备份故障类型的输入必须为普通文件")
+    shutil.copyfile(source, output)
+    content = bytearray(output.read_bytes())
+    if args.kind == "archive-empty":
+        content.clear()
+    elif args.kind == "archive-truncate":
+        content = content[:len(content) // 2]
+    elif args.kind == "archive-header":
+        if content:
+            content[0] ^= 0xFF
+    elif args.kind == "archive-tag":
+        if len(content) < 48:
+            output.unlink(missing_ok=True)
+            raise ValueError("备份样本过短，无法翻转尾部认证数据")
+        content[-1] ^= 0x01
+    output.write_bytes(content)
     print(f"故障副本已生成：{output}；来源未更改。")
     return tool.EXIT_OK
 
@@ -109,7 +93,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     fault = sub.add_parser("fault-copy")
     fault.add_argument("--root", required=True)
-    fault.add_argument("--kind", choices=("archive-empty", "archive-truncate", "archive-header", "archive-tag", "repo-missing", "repo-corrupt"), required=True)
+    fault.add_argument("--kind", choices=("archive-empty", "archive-truncate", "archive-header", "archive-tag"), required=True)
     fault.add_argument("--input", required=True)
     fault.add_argument("--output", required=True)
     fault.set_defaults(handler=fault_copy)

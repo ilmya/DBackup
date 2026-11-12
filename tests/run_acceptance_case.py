@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 执行指定验收用例并检查结果
 """Run the CTest group mapped to one automated acceptance case."""
 
 import argparse
@@ -25,8 +26,15 @@ def ctest_pattern(case_id: str) -> str:
         return "^DirectoryWatcherTest\\."
     if case_id.startswith("S3-META-"):
         return "^ArchiveV3Test\\.PreservesSafeRelativeSymbolicLink$"
-    if case_id.startswith("S5-INCR-"):
-        return "^(AcceptanceTestCliSmoke|LocalRepositoryTest\\.)"
+    incremental_cases = {
+        "S5-INCR-001": "^IncrementalChain\\.CreatesListsAndRestoresVersionsWithoutOverwriting$",
+        "S5-INCR-002": "^IncrementalDiff\\.FindsAddedChangedAndDeletedPaths$",
+        "S5-INCR-003": "^IncrementalScan\\.DetectsSameSizeAndTimestampContentChange$",
+        "S5-INCR-004": "^IncrementalChain\\.RestoresFileDirectoryAndSymlinkTransitions$",
+        "S5-INCR-007": "^IncrementalChain\\.StrictRetentionRebasesOldestKeptVersion$",
+    }
+    if case_id in incremental_cases:
+        return incremental_cases[case_id]
     return ""
 
 

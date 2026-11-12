@@ -1,3 +1,4 @@
+// 验证备份来源选择界面
 #include "gui/backup_options.h"
 #include "gui/filter_dialog.h"
 #include "gui/plan_result.h"
@@ -49,9 +50,9 @@ TEST(BackupOptions, MapsSelectionsAndKeepsModesIndependent) {
     EXPECT_EQ(widget.options().password, "test-password");
     incremental->setChecked(true);
     EXPECT_TRUE(widget.incremental());
-    EXPECT_FALSE(tar->isEnabled());
-    EXPECT_FALSE(compression->isEnabled());
-    EXPECT_FALSE(encryption->isEnabled());
+    EXPECT_TRUE(tar->isEnabled());
+    EXPECT_TRUE(compression->isEnabled());
+    EXPECT_TRUE(encryption->isEnabled());
     EXPECT_TRUE(password->isEnabled());
     full->setChecked(true);
     EXPECT_FALSE(widget.incremental());

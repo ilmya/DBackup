@@ -1,4 +1,5 @@
-#include "core/credential_store.h"
+// 验证密钥环不可用时的凭据错误处理
+#include "core/security/credential_store.h"
 #include <gtest/gtest.h>
 
 TEST(CredentialUnavailable, ReportsSaveAndLoadFailures) {

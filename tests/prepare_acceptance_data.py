@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 为验收测试准备文件与目录数据
 """Create the compact, repeatable Linux acceptance corpus."""
 
 import argparse

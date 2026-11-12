@@ -1,4 +1,5 @@
-#include "core/archive_tar.h"
+// 验证tar 格式兼容性及安全规则
+#include "core/archive/archive_tar.h"
 #include <gtest/gtest.h>
 
 TEST(TarRules, LargeFileHeaderUsesPaxSize) {

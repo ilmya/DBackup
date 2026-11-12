@@ -1,3 +1,4 @@
+# 验证验收工具的运行和报告
 import json
 import os
 from pathlib import Path

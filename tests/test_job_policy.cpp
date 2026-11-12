@@ -1,5 +1,6 @@
+// 验证计划请求与排队策略
 #include "automation/job_manager.h"
-#include "automation/cron.h"
+#include "automation/schedule/cron.h"
 #include <gtest/gtest.h>
 #include <cstdlib>
 
@@ -9,7 +10,7 @@ BackupJob validJob() {
     job.id = "job-1";
     job.name = "Backup";
     job.sources = {"/source"};
-    job.destination = "/repository";
+    job.destination = "/backup-output";
     job.cron = "* * * * *";
     return job;
 }
@@ -33,10 +34,9 @@ TEST(JobPolicy, IgnoresCronWhenNotScheduled) { auto job = validJob(); job.schedu
 TEST(JobPolicy, RejectsContradictoryFilter) { auto job = validJob(); job.filter.minSize = 20; job.filter.maxSize = 10; invalid(job); }
 TEST(JobPolicy, RejectsInvalidFormat) { auto job = validJob(); job.format = static_cast<PackFormat>(2); invalid(job); }
 TEST(JobPolicy, RejectsInvalidCompression) { auto job = validJob(); job.compression = static_cast<Compression>(4); invalid(job); }
-TEST(JobPolicy, RejectsRealtimeArchive) { auto job = validJob(); job.repository = false; job.realtime = true; invalid(job); }
+TEST(JobPolicy, RejectsRealtimeFullBackup) { auto job = validJob(); job.realtime = true; invalid(job); }
 TEST(JobPolicy, AllowsRealtimeIncrementalFormatsAndRejectsInvalidModes) {
     auto job = validJob();
-    job.repository = false;
     job.tarIncremental = true;
     job.format = PackFormat::Tar;
     job.realtime = true;
@@ -46,10 +46,7 @@ TEST(JobPolicy, AllowsRealtimeIncrementalFormatsAndRejectsInvalidModes) {
     EXPECT_TRUE(job_policy::validate(job, error)) << error.toStdString();
     job.format = PackFormat::Custom;
     EXPECT_TRUE(job_policy::validate(job, error)) << error.toStdString();
-    job.repository = true;
-    invalid(job);
 }
-TEST(JobPolicy, RejectsUnencryptedRepository) { auto job = validJob(); job.encrypted = false; invalid(job); }
 TEST(JobPolicy, ValidatesIdentifier) {
     EXPECT_TRUE(job_policy::validId("Abc-123"));
     for (const auto& id : {QString(), QString("../job"), QString("job_name"), QString::fromUtf8("任务")})

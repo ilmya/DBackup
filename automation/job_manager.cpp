@@ -1,5 +1,7 @@
+// 备份计划的配置、定时调度和实时触发
+// 负责计划配置的读取与原子保存、Cron 触发和文件监控；合并并发请求并记录执行结果。
 #include "automation/job_manager.h"
-#include "automation/cron.h"
+#include "automation/schedule/cron.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -12,7 +14,7 @@
 #include <QUuid>
 
 namespace {
-// 返回应用数据目录中的计划文件路径，并确保目录已创建。
+// 返回应用数据目录中的计划文件路径，并确保目录已创建
 QString filePath() {
     const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir().mkpath(directory);
@@ -22,24 +24,16 @@ QString filePath() {
 } // namespace
 
 namespace job_policy {
-// 检查计划标识仅由安全 ASCII 字母、数字和连字符组成。
+// 检查计划标识仅由安全 ASCII 字母、数字和连字符组成
 bool validId(const QString& id) {
     static const QRegularExpression pattern(QStringLiteral("^[A-Za-z0-9-]+$"));
     return !id.isEmpty() && pattern.match(id).hasMatch();
 }
 
-// 校验计划必填项、运行模式、cron、筛选器和算法枚举。
+// 校验计划必填项、运行模式、cron、筛选器和算法枚举
 bool validate(const BackupJob& job, QString& error) {
-    if (job.tarIncremental && job.repository) {
-        error = QObject::tr("增量归档不能同时使用版本仓库");
-        return false;
-    }
-    if (!job.repository && !job.tarIncremental && job.realtime) {
-        error = QObject::tr("实时备份需要增量仓库或增量归档模式");
-        return false;
-    }
-    if (job.repository && !job.encrypted) {
-        error = QObject::tr("版本仓库需要加密密码");
+    if (!job.tarIncremental && job.realtime) {
+        error = QObject::tr("实时备份需要增量备份模式");
         return false;
     }
 
@@ -65,13 +59,14 @@ bool validate(const BackupJob& job, QString& error) {
         return false;
     }
     if (static_cast<int>(job.format) > 1 || static_cast<int>(job.compression) > 3) {
-        error = QObject::tr("无效的归档格式或压缩算法");
+        error = QObject::tr("无效的备份格式或压缩算法");
         return false;
     }
 
     error.clear();
     return true;
 }
+// 根据暂停、执行器和运行状态决定如何处理一次计划请求。
 RunAction request(bool paused, bool hasExecutor, bool hasId, bool running, bool pending) {
     if (paused || !hasExecutor || !hasId)
         return RunAction::Reject;
@@ -79,6 +74,7 @@ RunAction request(bool paused, bool hasExecutor, bool hasId, bool running, bool 
         return RunAction::Start;
     return pending ? RunAction::Merge : RunAction::Queue;
 }
+// 只有计划仍存在、已启用且本次未取消时才执行等待中的请求。
 bool rerun(bool pending, bool found, bool enabled, bool cancelled) {
     return pending && found && enabled && !cancelled;
 }
@@ -90,17 +86,20 @@ JobManager::JobManager(QObject* p, QString configFilePath)
     connect(&timer_, &QTimer::timeout, this, [this] { tick(); });
     load();
 }
+// 启动定时器，建立实时监控并立即检查到期计划。
 void JobManager::start() {
     timer_.start(30000);
     if (watchers_.empty())
         syncWatchers();
     tick();
 }
+// 暂停或恢复调度；恢复时提交监控重建期间积累的重扫请求。
 void JobManager::pause(bool value) {
     paused_ = value;
     if (!paused_)
         flushRebuildRescans();
 }
+// 验证并新增或更新计划，保存失败时恢复原状态
 bool JobManager::upsert(BackupJob job, QString& error) {
     if (!loadError_.isEmpty()) {
         error = loadError_;
@@ -134,6 +133,7 @@ bool JobManager::upsert(BackupJob job, QString& error) {
         onChanged_();
     return true;
 }
+// 删除指定计划及其等待请求，并保存计划列表
 bool JobManager::remove(const QString& id, QString& error) {
     const auto before = jobs_;
     int index = -1;
@@ -159,6 +159,7 @@ bool JobManager::remove(const QString& id, QString& error) {
         onChanged_();
     return true;
 }
+// 切换计划启用状态并更新调度和实时监控
 bool JobManager::setEnabled(const QString& id, bool enabled, QString& error) {
     for (auto& job : jobs_)
         if (job.id == id) {
@@ -175,6 +176,7 @@ bool JobManager::setEnabled(const QString& id, bool enabled, QString& error) {
     error = tr("任务不存在");
     return false;
 }
+// 请求立即运行指定计划，必要时合并后续执行
 bool JobManager::runNow(const QString& id, QString& error) {
     for (const auto& job : jobs_)
         if (job.id == id) {
@@ -198,6 +200,7 @@ bool JobManager::runNow(const QString& id, QString& error) {
     error = tr("任务不存在");
     return false;
 }
+// 根据 cron 表达式计算下次触发时间
 void JobManager::updateNext(BackupJob& job) {
     if (!job.enabled || !job.scheduled) {
         job.nextRun = {};
@@ -212,6 +215,7 @@ void JobManager::updateNext(BackupJob& job) {
             job.nextRun = QDateTime::fromSecsSinceEpoch(next);
     }
 }
+// 决定启动、排队或合并计划请求，避免同一计划并发运行
 bool JobManager::requestRun(const BackupJob& job) {
     const auto action = job_policy::request(paused_, bool(executor_), !job.id.isEmpty(),
                                             running_.contains(job.id), pending_.contains(job.id));
@@ -240,6 +244,7 @@ bool JobManager::requestRun(const BackupJob& job) {
     executor_(job);
     return true;
 }
+// 检查到期的定时计划，安排执行并更新下次运行时间
 void JobManager::tick() {
     if (paused_ || !executor_)
         return;
@@ -254,6 +259,7 @@ void JobManager::tick() {
     if (changed)
         save();
 }
+// 按实时计划配置同步目录监控器及监控状态
 void JobManager::syncWatchers(const QString& changedId) {
     QSet<QString> affected;
     if (!changedId.isEmpty())
@@ -457,6 +463,7 @@ void JobManager::syncWatchers(const QString& changedId) {
     }
     flushRebuildRescans();
 }
+// 提交监控器重建后积累的重扫描请求
 void JobManager::flushRebuildRescans() {
     if (paused_ || !executor_)
         return;
@@ -487,6 +494,7 @@ void JobManager::flushRebuildRescans() {
             rebuildRescans_.remove(id);
     }
 }
+// 记录任务执行结果，并处理等待运行的同一计划
 void JobManager::markFinished(const QString& id, bool success, const QString& message, bool partial,
                               bool cancelled) {
     running_.remove(id);
@@ -523,6 +531,7 @@ void JobManager::markFinished(const QString& id, bool success, const QString& me
         requestRun(rerun);
     }
 }
+// 将计划列表保存到配置文件并返回可能的错误
 bool JobManager::save(QString* saveError) {
     QJsonArray array;
     for (const auto& j : jobs_) {
@@ -550,8 +559,7 @@ bool JobManager::save(QString* saveError) {
             selected.append(
                 QJsonObject{{"include", r.include}, {"path", QString::fromUtf8(r.path.c_str())}});
         filter["sourceRules"] = selected;
-        QJsonObject o{{"repository", j.repository},
-                      {"tarIncremental", j.tarIncremental},
+        QJsonObject o{{"tarIncremental", j.tarIncremental},
                       {"encrypted", j.encrypted},
                       {"format", static_cast<int>(j.format)},
                       {"compression", static_cast<int>(j.compression)},
@@ -597,6 +605,7 @@ bool JobManager::save(QString* saveError) {
     }
     return true;
 }
+// 读取计划配置，恢复计划并记录加载错误
 void JobManager::load() {
     QFile file(configFilePath_);
     if (!file.exists())
@@ -638,7 +647,10 @@ void JobManager::load() {
             return;
 
         BackupJob job;
-        job.repository = object.value("repository").toBool(true);
+        // 旧版本的仓库计划不再属于自动任务，读取时直接跳过。
+        if (object.value("repository").toBool(false) &&
+            !object.value("tarIncremental").toBool(false))
+            continue;
         job.tarIncremental = object.value("tarIncremental").toBool(false);
         job.encrypted = object.value("encrypted").toBool(true);
         job.format = static_cast<PackFormat>(object.value("format").toInt(0));

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 在隔离测试密钥环中启动指定命令
 set -euo pipefail
 
 runtime_root="${DBACKUP_TEST_RUNTIME_ROOT:-/tmp}"

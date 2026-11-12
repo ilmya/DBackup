@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 验收工具命令行的冒烟验证
 """Exercise the development CLI against the independent fixture comparator."""
 
 import argparse
@@ -69,23 +70,9 @@ def main() -> int:
     compare_tree(normal, restored_archive, root / "reports" / f"cli-archive-{run_id}.md", env,
                  layout="flatten")
 
-    source = root / "fixtures" / "incremental"
-    repository = root / "repositories" / f"cli-smoke-{run_id}"
-    snapshot = invoke(cli, ["repository", "snapshot", "--root", str(root), "--repository", str(repository),
-                            "--source", str(source)], env)["data"]["id"]
-    listed = invoke(cli, ["repository", "list", "--root", str(root), "--repository", str(repository)], env)
-    if not any(item.get("id") == snapshot for item in listed["data"].get("snapshots", [])):
-        raise RuntimeError("Repository list omitted the newly committed snapshot")
-    restored_repository = root / "restore" / f"cli-repository-{run_id}"
-    invoke(cli, ["repository", "restore", "--root", str(root), "--repository", str(repository),
-                 "--id", snapshot, "--output", str(restored_repository)], env)
-    compare_tree(source, restored_repository, root / "reports" / f"cli-repository-{run_id}.md", env,
-                 layout="preserve")
-
     print(json.dumps({"ok": True, "command": "acceptance-cli-smoke",
                       "archiveEntries": inspected["data"]["count"],
-                      "repositorySnapshot": snapshot,
-                      "archiveRestoreMatches": True, "repositoryRestoreMatches": True},
+                      "archiveRestoreMatches": True},
                      ensure_ascii=False, separators=(",", ":")))
     return 0
 

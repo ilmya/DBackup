@@ -1,7 +1,9 @@
+// 图形界面共用样式
+// 集中提供 Qt Widgets 样式，统一页面、按钮、表格和状态文本的视觉表现。
 #pragma once
 #include <QString>
 namespace DBackupTheme {
-// 返回主窗口与对话框共用的应用内控件样式表。
+// 返回主窗口与对话框共用的应用内控件样式表
 inline QString styleSheet() {
     return QStringLiteral(R"(
         * { color: #172033; }

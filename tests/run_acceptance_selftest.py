@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 运行验收工具自身的测试
 """Run the independent acceptance-tool unit tests in a pre-created work area."""
 
 import os
