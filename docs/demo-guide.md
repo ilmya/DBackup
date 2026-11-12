@@ -33,7 +33,7 @@ bash test.sh --format tar --compression none --no-encrypt  # 不压缩、不加�
 
 脚本依次备份所选来源、恢复到新目录，再比较文件内容和元数据。每次结果保存在 `/home/ilm/DBackup-Demo/restore/dbackup-verify-*`，其中包含每组的备份文件、恢复目录、`*-report.md` 和汇总 `summary.md`。终端显示耗时、大小和通过、失败、跳过或受阻数量。普通用户遇到预期的权限跳过时可能显示“部分完成”且退出码为 0；失败返回 1，提权运行遇到跳过或受阻返回 2。脚本验证核心备份和恢复流程；图形界面操作需要另行演示。
 
-脚本要求演示根目录顶层只包含标记文件 `.dbackup-acceptance.json`、三组来源目录和 `restore/`。当前演示目录还存在 `task/` 和 `task-backup/`，脚本会因此报告目录结构不符；演示前请自行将这两个目录移到 `DBackup-Demo` 之外并妥善保存。脚本不会生成或重置三组来源样例。
+脚本要求演示根目录包含标记文件 `.dbackup-acceptance.json`、三组来源目录和 `restore/`。顶层的 `task/` 和 `task-backup/` 会被忽略，其他额外项目仍会触发目录结构检查。脚本不会生成或重置三组来源样例。
 
 ## 演示数据结构
 

@@ -21,6 +21,7 @@ DEFAULT_ROOT = Path("/home/ilm/DBackup-Demo")
 MARKER = tool.MARKER
 LAYOUT_VERSION = 2
 TOP_LEVEL = ("common", "large-data", "special-files", "restore")
+IGNORED_TOP_LEVEL = {"task", "task-backup"}
 
 
 class DemoError(RuntimeError):
@@ -71,9 +72,9 @@ def validate_layout(root: Path) -> None:
     expected = {MARKER, *TOP_LEVEL}
     with os.scandir(root) as entries:
         actual = {entry.name for entry in entries}
-    if actual != expected:
-        missing = sorted(expected - actual)
-        extra = sorted(actual - expected)
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected - IGNORED_TOP_LEVEL)
+    if missing or extra:
         raise tool.SafetyError(
             f"演示目录结构不符（缺少：{missing or '无'}；多出：{extra or '无'}）；"
             "请检查演示目录。"
